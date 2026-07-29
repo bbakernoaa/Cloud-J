@@ -23,6 +23,16 @@ message("=================================================================")
 #-----------------------------------------------------------------------------
 option(CLOUDJ_ENABLE_TESTS "Build the tests" ON)
 
+# Add build toggle
+option(CLOUDJ_CPP_PORT "Build C++ header-only port and standalone driver" ON)
+
+if(CLOUDJ_CPP_PORT)
+    # Target C++14 standard
+    set(CMAKE_CXX_STANDARD 14)
+    set(CMAKE_CXX_STANDARD_REQUIRED ON)
+    include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
+endif()
+
 #-----------------------------------------------------------------------------
 # Set policies
 #-----------------------------------------------------------------------------
