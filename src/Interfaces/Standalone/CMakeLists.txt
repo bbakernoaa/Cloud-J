@@ -26,6 +26,12 @@ if(CLOUDJ_CPP_PORT)
         set_target_properties(cloudj_standalone_cpp PROPERTIES
                 RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
         )
+        
+        option(CLOUDJ_GPU_MODE_BENCH "Compile C++ standalone in GPU Hermite spline mode" OFF)
+        if(CLOUDJ_GPU_MODE_BENCH)
+                target_compile_definitions(cloudj_standalone_cpp PRIVATE CLOUDJ_GPU_MODE)
+        endif()
+
         if(WIN32)
                 target_link_libraries(cloudj_standalone_cpp
                         PRIVATE "-Wl,--stack,10485760"
