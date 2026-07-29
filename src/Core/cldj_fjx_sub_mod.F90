@@ -91,7 +91,7 @@ MODULE CLDJ_FJX_SUB_MOD
       PRIVATE :: BLKSLV   ! Called in MIESCT
       PRIVATE :: GEN_ID   ! Called in BLKSLV
       PRIVATE :: JRATET   ! Called in Photo_JX
-      PRIVATE :: X_INTERP ! Called in Photo_JX and JRATET
+      PUBLIC :: X_INTERP ! Called in Photo_JX and JRATET
       PRIVATE :: EXTRAL1  ! Called in Photo_JX
 
       ! Other private subroutines called in Photo_JX

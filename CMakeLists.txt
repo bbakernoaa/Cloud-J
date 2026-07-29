@@ -1,7 +1,7 @@
 # Cloud-J/CMakeLists.txt
 
 cmake_minimum_required(VERSION 3.5)
-project(CLOUDJ VERSION 8.0.2 LANGUAGES Fortran)
+project(CLOUDJ VERSION 8.0.2 LANGUAGES Fortran CXX)
 
 #-----------------------------------------------------------------------------
 # Add CMakeScripts/ to the module path
@@ -149,7 +149,7 @@ target_compile_definitions(CloudJBuildProperties INTERFACE
 #-----------------------------------------------------------------------------
 set(OMP "TRUE" CACHE STRING "Enables/disables Cloud-J built with OpenMP")
 if(${OMP})
-    find_package(OpenMP REQUIRED)
+    find_package(OpenMP COMPONENTS Fortran REQUIRED)
     ###########################################################################
     # NOTE: Newer versions of CMake (maybe > 3.8) prefer OpenMP::OpenMP
     # rather than ${OpenMP_Fortran_FLAGS} to specify compilation options

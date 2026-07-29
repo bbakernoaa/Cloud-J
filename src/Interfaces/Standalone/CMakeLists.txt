@@ -18,3 +18,18 @@
                 )
         endif()
 #endif()
+
+if(CLOUDJ_CPP_PORT)
+        add_executable(cloudj_standalone_cpp
+                ${CMAKE_CURRENT_SOURCE_DIR}/../../../src/standalone/cloudj_standalone.cpp
+        )
+        set_target_properties(cloudj_standalone_cpp PROPERTIES
+                RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+        )
+        if(WIN32)
+                target_link_libraries(cloudj_standalone_cpp
+                        PRIVATE "-Wl,--stack,10485760"
+                )
+        endif()
+endif()
+
