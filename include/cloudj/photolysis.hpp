@@ -28,6 +28,10 @@ struct SpecData {
     std::vector<std::vector<double>> qo3; // [W_][3]
     std::vector<std::vector<double>> q1d; // [W_][3]
     std::vector<std::vector<std::vector<double>>> qqq; // [W_][3][species]
+
+    // Pre-computed reciprocal temperature span intervals
+    std::vector<double> inv_t12; // [species] reciprocal of (tqq[species][1] - tqq[species][0])
+    std::vector<double> inv_t23; // [species] reciprocal of (tqq[species][2] - tqq[species][1])
 };
 
 /**
@@ -65,15 +69,18 @@ inline void JRATET(
         for (int k = 0; k < W_; ++k) {
             double qo2tot = CrossSections::interpolate(tt, spec.tqq[0][0], spec.qo2[k][0], 
                                                           spec.tqq[0][1], spec.qo2[k][1], 
-                                                          spec.tqq[0][2], spec.qo2[k][2], spec.lqq[0]);
+                                                          spec.tqq[0][2], spec.qo2[k][2], spec.lqq[0],
+                                                          spec.inv_t12[0], spec.inv_t23[0]);
 
             double qo3tot = CrossSections::interpolate(tt, spec.tqq[1][0], spec.qo3[k][0], 
                                                           spec.tqq[1][1], spec.qo3[k][1], 
-                                                          spec.tqq[1][2], spec.qo3[k][2], spec.lqq[1]);
+                                                          spec.tqq[1][2], spec.qo3[k][2], spec.lqq[1],
+                                                          spec.inv_t12[1], spec.inv_t23[1]);
 
             double qo31dy = CrossSections::interpolate(tt, spec.tqq[2][0], spec.q1d[k][0], 
                                                           spec.tqq[2][1], spec.q1d[k][1], 
-                                                          spec.tqq[2][2], spec.q1d[k][2], spec.lqq[2]);
+                                                          spec.tqq[2][2], spec.q1d[k][2], spec.lqq[2],
+                                                          spec.inv_t12[2], spec.inv_t23[2]);
 
             double qo31d = qo31dy * qo3tot;
 
@@ -88,7 +95,8 @@ inline void JRATET(
             for (int k = 0; k < W_; ++k) {
                 double qqqt = CrossSections::interpolate(var, spec.tqq[j][0], spec.qqq[k][0][j], 
                                                               spec.tqq[j][1], spec.qqq[k][1][j], 
-                                                              spec.tqq[j][2], spec.qqq[k][2][j], spec.lqq[j]);
+                                                              spec.tqq[j][2], spec.qqq[k][2][j], spec.lqq[j],
+                                                              spec.inv_t12[j], spec.inv_t23[j]);
                 valj[j] += qqqt * fff(k, l);
             }
         }

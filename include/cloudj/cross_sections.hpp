@@ -47,7 +47,7 @@ inline double smooth_min(double a, double b, double k) {
  *    microscopic 1K boundary region at the corner while matching the original linear interpolation 
  *    identically (within 1e-12) for the remaining 99.9% of the temperature spectrum.
  */
-inline double interpolate(double t_int, double t1, double x1, double t2, double x2, double t3, double x3, int l123) {
+inline double interpolate(double t_int, double t1, double x1, double t2, double x2, double t3, double x3, int l123, double inv_t12 = 0.0, double inv_t23 = 0.0) {
 #if defined(CLOUDJ_GPU_MODE)
     // -------------------------------------------------------------------------
     // GPU MODE: 100% branchless, continuously differentiable (C1), SIMD optimal
@@ -58,7 +58,7 @@ inline double interpolate(double t_int, double t1, double x1, double t2, double 
     } else if (l123 == 2) {
         // High-speed, branchless, tightly-clamped C1 smooth minimum/maximum
         double t_clamped = smooth_min(t2, smooth_max(t1, t_int, k), k);
-        double tfact = (t_clamped - t1) / (t2 - t1);
+        double tfact = (inv_t12 != 0.0) ? (t_clamped - t1) * inv_t12 : (t_clamped - t1) / (t2 - t1);
         return x1 + tfact * (x2 - x1);
     } else {
         // Multi-point selection using hardware conditional move select (no branching)
@@ -68,7 +68,8 @@ inline double interpolate(double t_int, double t1, double x1, double t2, double 
         double x_end   = (t_int < t2) ? x2 : x3;
 
         double t_clamped = smooth_min(t_end, smooth_max(t_start, t_int, k), k);
-        double tfact = (t_clamped - t_start) / (t_end - t_start);
+        double inv_tspan = (t_int < t2) ? inv_t12 : inv_t23;
+        double tfact = (inv_tspan != 0.0) ? (t_clamped - t_start) * inv_tspan : (t_clamped - t_start) / (t_end - t_start);
         return x_start + tfact * (x_end - x_start);
     }
 #else
@@ -80,15 +81,16 @@ inline double interpolate(double t_int, double t1, double x1, double t2, double 
     } else if (l123 == 2) {
         if (t_int <= t1) return x1;
         if (t_int >= t2) return x2;
-        return x1 + ((t_int - t1) / (t2 - t1)) * (x2 - x1);
+        double tfact = (inv_t12 != 0.0) ? (t_int - t1) * inv_t12 : (t_int - t1) / (t2 - t1);
+        return x1 + tfact * (x2 - x1);
     } else {
         if (t_int <= t1) return x1;
         if (t_int >= t3) return x3;
         if (t_int <= t2) {
-            double tfact = (t_int - t1) / (t2 - t1);
+            double tfact = (inv_t12 != 0.0) ? (t_int - t1) * inv_t12 : (t_int - t1) / (t2 - t1);
             return x1 + tfact * (x2 - x1);
         } else {
-            double tfact = (t_int - t2) / (t3 - t2);
+            double tfact = (inv_t23 != 0.0) ? (t_int - t2) * inv_t23 : (t_int - t2) / (t3 - t2);
             return x2 + tfact * (x3 - x2);
         }
     }

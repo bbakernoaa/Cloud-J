@@ -39,6 +39,14 @@ public:
         spec_data.qo2.assign(Photolysis::W_, std::vector<double>({1e-20, 2e-20, 3e-20}));
         spec_data.qo3.assign(Photolysis::W_, std::vector<double>({1e-19, 2e-19, 3e-19}));
         spec_data.q1d.assign(Photolysis::W_, std::vector<double>({0.1, 0.5, 0.9}));
+
+        // Setup pre-computed reciprocal temperature span intervals
+        spec_data.inv_t12.assign(3, 0.0);
+        spec_data.inv_t23.assign(3, 0.0);
+        for (size_t j = 0; j < 3; ++j) {
+            spec_data.inv_t12[j] = 1.0 / (spec_data.tqq[j][1] - spec_data.tqq[j][0]);
+            spec_data.inv_t23[j] = 1.0 / (spec_data.tqq[j][2] - spec_data.tqq[j][1]);
+        }
     }
 
     const Photolysis::SpecData& get_spec_data() const noexcept {

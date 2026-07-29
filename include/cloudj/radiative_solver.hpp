@@ -24,7 +24,7 @@ namespace RadiativeSolver {
 constexpr int M_ = 4;
 constexpr int M2_ = 8;
 
-struct Workspace {
+struct alignas(64) Workspace {
     // 2D buffers flat storage
     std::vector<double> a_data;  // size: M_ * nd
     std::vector<double> c_data;  // size: M_ * nd
@@ -312,21 +312,24 @@ inline void GEN_ID(
     }
 }
 
-// 4x4 LU solver helper matching manual BLKSLV algorithm
+// 4x4 LU solver helper matching manual BLKSLV algorithm (Highly Optimized Reciprocal Form)
 inline void solve_lu_4x4(double E[M_][M_]) {
-    E[1][0] = E[1][0] / E[0][0];
+    double inv_E00 = 1.0 / E[0][0];
+    E[1][0] *= inv_E00;
     E[1][1] = E[1][1] - E[1][0] * E[0][1];
     E[1][2] = E[1][2] - E[1][0] * E[0][2];
     E[1][3] = E[1][3] - E[1][0] * E[0][3];
     
-    E[2][0] = E[2][0] / E[0][0];
-    E[2][1] = (E[2][1] - E[2][0] * E[0][1]) / E[1][1];
+    E[2][0] *= inv_E00;
+    double inv_E11 = 1.0 / E[1][1];
+    E[2][1] = (E[2][1] - E[2][0] * E[0][1]) * inv_E11;
     E[2][2] = E[2][2] - E[2][0] * E[0][2] - E[2][1] * E[1][2];
     E[2][3] = E[2][3] - E[2][0] * E[0][3] - E[2][1] * E[1][3];
     
-    E[3][0] = E[3][0] / E[0][0];
-    E[3][1] = (E[3][1] - E[3][0] * E[0][1]) / E[1][1];
-    E[3][2] = (E[3][2] - E[3][0] * E[0][2] - E[3][1] * E[1][2]) / E[2][2];
+    E[3][0] *= inv_E00;
+    E[3][1] = (E[3][1] - E[3][0] * E[0][1]) * inv_E11;
+    double inv_E22 = 1.0 / E[2][2];
+    E[3][2] = (E[3][2] - E[3][0] * E[0][2] - E[3][1] * E[1][2]) * inv_E22;
     E[3][3] = E[3][3] - E[3][0] * E[0][3] - E[3][1] * E[1][3] - E[3][2] * E[2][3];
 
     // Invert L
@@ -337,17 +340,17 @@ inline void solve_lu_4x4(double E[M_][M_]) {
     E[2][0] = -E[2][0] - E[2][1] * E[1][0];
     E[1][0] = -E[1][0];
 
-    // Invert U
+    // Invert U (Using pre-calculated reciprocals for division-free speedups)
     E[3][3] = 1.0 / E[3][3];
-    E[2][3] = -E[2][3] * E[3][3] / E[2][2];
-    E[2][2] = 1.0 / E[2][2];
-    E[1][3] = -(E[1][2] * E[2][3] + E[1][3] * E[3][3]) / E[1][1];
-    E[1][2] = -E[1][2] * E[2][2] / E[1][1];
-    E[1][1] = 1.0 / E[1][1];
-    E[0][3] = -(E[0][1] * E[1][3] + E[0][2] * E[2][3] + E[0][3] * E[3][3]) / E[0][0];
-    E[0][2] = -(E[0][1] * E[1][2] + E[0][2] * E[2][2]) / E[0][0];
-    E[0][1] = -E[0][1] * E[1][1] / E[0][0];
-    E[0][0] = 1.0 / E[0][0];
+    E[2][3] = -E[2][3] * E[3][3] * inv_E22;
+    E[2][2] = inv_E22;
+    E[1][3] = -(E[1][2] * E[2][3] + E[1][3] * E[3][3]) * inv_E11;
+    E[1][2] = -E[1][2] * E[2][2] * inv_E11;
+    E[1][1] = inv_E11;
+    E[0][3] = -(E[0][1] * E[1][3] + E[0][2] * E[2][3] + E[0][3] * E[3][3]) * inv_E00;
+    E[0][2] = -(E[0][1] * E[1][2] + E[0][2] * E[2][2]) * inv_E00;
+    E[0][1] = -E[0][1] * E[1][1] * inv_E00;
+    E[0][0] = inv_E00;
 
     // Multiply U-inverse * L-inverse, storing result in E
     double temp[M_][M_];
