@@ -7,6 +7,17 @@
 #include <algorithm>
 #include <experimental/mdspan.hpp>
 
+// Portable compiler loop-unrolling hint macros for standard compilers (GCC, Clang, Intel oneAPI)
+#if defined(__clang__)
+  #define CLOUDJ_UNROLL_4 _Pragma("clang loop unroll_count(4)")
+#elif defined(__INTEL_COMPILER) || defined(__INTEL_CLANG_COMPILER)
+  #define CLOUDJ_UNROLL_4 _Pragma("unroll(4)")
+#elif defined(__GNUC__)
+  #define CLOUDJ_UNROLL_4 _Pragma("GCC unroll 4")
+#else
+  #define CLOUDJ_UNROLL_4
+#endif
+
 namespace CloudJ {
 namespace RadiativeSolver {
 
@@ -86,10 +97,12 @@ inline void GEN_ID(
 
     // Initialize outputs
     for (int l = 0; l < nd; ++l) {
+        CLOUDJ_UNROLL_4
         for (int i = 0; i < M_; ++i) {
             a(i, l) = 0.0;
             c(i, l) = 0.0;
             h(i, l) = 0.0;
+            CLOUDJ_UNROLL_4
             for (int j = 0; j < M_; ++j) {
                 b(i, j, l) = 0.0;
                 aa(i, j, l) = 0.0;

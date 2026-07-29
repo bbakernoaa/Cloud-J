@@ -16,6 +16,8 @@
 
 namespace CloudJ {
 
+using mdspan_2d_mut = std::experimental::mdspan<double, std::experimental::dextents<size_t, 2>, std::experimental::layout_left>;
+
 class Engine {
 private:
     Photolysis::SpecData spec_data;
@@ -61,8 +63,9 @@ public:
             return rates; // return zero photolysis rates instantly
         }
 
-        // Setup actinic flux integration matrices FFF
-        std::vector<std::vector<double>> fff(Photolysis::W_, std::vector<double>(lu, 0.0));
+        // Setup actinic flux integration matrices FFF (flattened contiguous 1D layout)
+        std::vector<double> fff_data(Photolysis::W_ * lu, 0.0);
+        mdspan_2d_mut fff(fff_data.data(), Photolysis::W_, lu);
         
         double u0 = std::cos(solar_zenith_angle * Context::pi / 180.0);
         
@@ -70,7 +73,7 @@ public:
         for (int k = 0; k < Photolysis::W_; ++k) {
             // Replicate standard actinic flux level approximations for reference profiles
             for (size_t l = 0; l < lu; ++l) {
-                fff[k][l] = u0 * 1e14; // scale flux based on standard direct solar rays
+                fff(k, l) = u0 * 1e14; // scale flux based on standard direct solar rays
             }
         }
 

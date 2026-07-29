@@ -37,7 +37,7 @@ struct SpecData {
 inline void JRATET(
     const std::vector<double>& ppj, // pressure edges [lu + 1]
     const std::vector<double>& ttj, // mid-layer temperatures [lu + 1]
-    std::vector<std::vector<double>>& fff, // mean actinic fluxes [W_][lu]
+    std::experimental::mdspan<double, std::experimental::dextents<size_t, 2>, std::experimental::layout_left> fff, // mean actinic fluxes [W_][lu]
     std::vector<std::vector<double>>& valjl, // [lu][njx]
     const SpecData& spec,
     int lu,
@@ -56,7 +56,7 @@ inline void JRATET(
 
         // zero bin-11 below 100 hPa matching the O2 e-fold limit
         if (pp > 100.0) {
-            fff[10][l] = 0.0; // 0-based index 10 corresponds to bin 11
+            fff(10, l) = 0.0; // 0-based index 10 corresponds to bin 11
         }
 
         std::vector<double> valj(spec.njx, 0.0);
@@ -77,9 +77,9 @@ inline void JRATET(
 
             double qo31d = qo31dy * qo3tot;
 
-            valj[0] += qo2tot * fff[k][l];
-            valj[1] += qo3tot * fff[k][l];
-            valj[2] += qo31d  * fff[k][l];
+            valj[0] += qo2tot * fff(k, l);
+            valj[1] += qo3tot * fff(k, l);
+            valj[2] += qo31d  * fff(k, l);
         }
 
         // Calculate photolysis rates for reactions 4 to NJX (indices 3 to NJX-1)
@@ -89,7 +89,7 @@ inline void JRATET(
                 double qqqt = CrossSections::interpolate(var, spec.tqq[j][0], spec.qqq[k][0][j], 
                                                               spec.tqq[j][1], spec.qqq[k][1][j], 
                                                               spec.tqq[j][2], spec.qqq[k][2][j], spec.lqq[j]);
-                valj[j] += qqqt * fff[k][l];
+                valj[j] += qqqt * fff(k, l);
             }
         }
 
