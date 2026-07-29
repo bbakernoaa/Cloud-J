@@ -83,17 +83,17 @@ To catch edge cases and assure absolute mathematical robustness under extreme co
 
 ## 5. Benchmarking & Performance Results
 
-We executed a high-resolution performance comparison benchmark over 100 runs on an Apple Silicon Darwin workstation:
+We executed a high-resolution performance comparison benchmark over 2,500 runs on an Apple Silicon Darwin workstation:
 
 | Compilation / Execution Mode | Elapsed Time | Throughput | Speedup vs Fortran |
 |:---|:---:|:---:|:---:|
-| **Fortran (gfortran)** | `9.1434 s` | **`10.9 columns/s`** | *[Reference]* |
-| **C++ (CPU Parity)** | `0.3589 s` | **`278.7 columns/s`** | **`25.48x`** |
-| **C++ (GPU-Hermite)** | `0.4000 s` | **`250.0 columns/s`** | **`22.86x`** |
+| **Fortran (gfortran)** | `214.3349 s` | **`11.7 columns/s`** | *[Reference]* |
+| **C++ (CPU Parity)** | `8.3623 s` | **`299.0 columns/s`** | **`25.63x`** |
+| **C++ (GPU-Hermite)** | `8.5441 s` | **`292.6 columns/s`** | **`25.09x`** |
 
 ### 5.1. Performance Analysis
 * **Why C++ is 25x Faster**: The massive speedup is primarily achieved because C++ completely avoids disk I/O at initialization by compiling standard tables as headers. Additionally, modern compiler vectorization and cache locality via `mdspan` out-optimize legacy Fortran common blocks.
-* **C++ CPU vs GPU-Hermite on the CPU**: Standard CPUs utilize advanced branch-prediction hardware, meaning the conditional `if-else` statements of the standard CPU mode carry almost zero penalty. On the CPU, the arithmetic divisions and multiplications of the polynomial smooth min/max are slightly heavier than CPU branch predictions.
+* **C++ CPU vs GPU-Hermite on the CPU**: Standard CPUs utilize advanced branch-prediction hardware, meaning the conditional `if-else` statements of the standard CPU mode carry almost zero penalty. On the CPU, the arithmetic divisions and multiplications of the polynomial smooth min/max are slightly heavier than CPU branch predictions, yielding a virtually identical speedup ratio (`0.98x`).
 * **On GPU Hardware**: Because GPUs have no branch prediction and suffer heavily from warp divergence, the GPU-Hermite mode is expected to yield **orders of magnitude higher throughput** because it is completely branch-free.
 
 ---

@@ -14,13 +14,15 @@ def execute_binary_repeatedly(binary_path, iterations, use_headers_flag=True):
         args.append("--use-headers-only")
         
     start_time = time.perf_counter()
-    for _ in range(iterations):
+    for i in range(1, iterations + 1):
         res = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=os.path.dirname(binary_path))
         # Ignore returncode for Fortran standalone on Darwin/macOS if it successfully ran and printed results
         is_fortran = "standalone_cpp" not in binary_path
         if res.returncode != 0 and not (is_fortran and sys.platform == "darwin"):
             print(f"Error: Binary {binary_path} failed to execute inside {os.path.dirname(binary_path)}.", file=sys.stderr)
             return None
+        if i % 500 == 0:
+            print(f"  -> Completed {i} / {iterations} runs...", flush=True)
     end_time = time.perf_counter()
     return end_time - start_time
 
