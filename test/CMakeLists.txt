@@ -50,6 +50,9 @@ if(CLOUDJ_CPP_PORT)
   set_target_properties(test_cpp_math PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
   )
+  if(CLOUDJ_USE_KOKKOS)
+    target_link_libraries(test_cpp_math PUBLIC Kokkos::kokkos Kokkos::kokkoskernels)
+  endif()
 
   add_executable(test_fortran_math
     ${CMAKE_CURRENT_SOURCE_DIR}/../tests/fortran/test_fortran_math.F90

@@ -31,6 +31,13 @@ if(CLOUDJ_CPP_PORT)
     set(CMAKE_CXX_STANDARD 14)
     set(CMAKE_CXX_STANDARD_REQUIRED ON)
     include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
+
+    option(CLOUDJ_USE_KOKKOS "Enable Kokkos GPU Dual-Backend" OFF)
+    if(CLOUDJ_USE_KOKKOS)
+        find_package(Kokkos REQUIRED)
+        find_package(KokkosKernels REQUIRED)
+        add_definitions(-DCLOUDJ_USE_KOKKOS)
+    endif()
 endif()
 
 #-----------------------------------------------------------------------------

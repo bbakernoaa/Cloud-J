@@ -37,5 +37,9 @@ if(CLOUDJ_CPP_PORT)
                         PRIVATE "-Wl,--stack,10485760"
                 )
         endif()
+
+        if(CLOUDJ_USE_KOKKOS)
+                target_link_libraries(cloudj_standalone_cpp PUBLIC Kokkos::kokkos Kokkos::kokkoskernels)
+        endif()
 endif()
 

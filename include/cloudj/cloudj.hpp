@@ -13,6 +13,7 @@
 #include <cloudj/cross_sections.hpp>
 #include <cloudj/radiative_solver.hpp>
 #include <cloudj/photolysis.hpp>
+#include <cloudj/kokkos_backend.hpp>
 
 namespace CloudJ {
 
