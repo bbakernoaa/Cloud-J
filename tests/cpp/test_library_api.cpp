@@ -91,6 +91,25 @@ void test_error_handling() {
     }
 }
 
+void test_radiative_solver_workspace() {
+    CloudJ::RadiativeSolver::Workspace ws;
+    size_t nd = 10;
+    ws.resize(nd);
+
+    assert(ws.a_data.size() == CloudJ::RadiativeSolver::M_ * nd);
+    assert(ws.c_data.size() == CloudJ::RadiativeSolver::M_ * nd);
+    assert(ws.h_data.size() == CloudJ::RadiativeSolver::M_ * nd);
+    assert(ws.rr_data.size() == CloudJ::RadiativeSolver::M_ * nd);
+
+    assert(ws.b_data.size() == CloudJ::RadiativeSolver::M_ * CloudJ::RadiativeSolver::M_ * nd);
+    assert(ws.aa_data.size() == CloudJ::RadiativeSolver::M_ * CloudJ::RadiativeSolver::M_ * nd);
+    assert(ws.cc_data.size() == CloudJ::RadiativeSolver::M_ * CloudJ::RadiativeSolver::M_ * nd);
+    assert(ws.dd_data.size() == CloudJ::RadiativeSolver::M_ * CloudJ::RadiativeSolver::M_ * nd);
+
+    for (double val : ws.a_data) assert(val == 0.0);
+    for (double val : ws.b_data) assert(val == 0.0);
+}
+
 int main() {
     std::cout << "Running standard library API unit tests...\n";
     test_profile_bounds();
@@ -98,6 +117,7 @@ int main() {
     test_radiative_solver_and_gauss_gauss();
     test_photolysis_and_orchestrator();
     test_error_handling();
+    test_radiative_solver_workspace();
     std::cout << "All library API unit tests passed successfully!\n";
     return 0;
 }

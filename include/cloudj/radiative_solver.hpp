@@ -13,6 +13,36 @@ namespace RadiativeSolver {
 constexpr int M_ = 4;
 constexpr int M2_ = 8;
 
+struct Workspace {
+    // 2D buffers flat storage
+    std::vector<double> a_data;  // size: M_ * nd
+    std::vector<double> c_data;  // size: M_ * nd
+    std::vector<double> h_data;  // size: M_ * nd
+    std::vector<double> rr_data; // size: M_ * nd
+
+    // 3D buffers flat storage
+    std::vector<double> b_data;  // size: M_ * M_ * nd
+    std::vector<double> aa_data; // size: M_ * M_ * nd
+    std::vector<double> cc_data; // size: M_ * M_ * nd
+    std::vector<double> dd_data; // size: M_ * M_ * nd
+
+    // Resizes all vectors once to the required layer depth nd
+    void resize(size_t nd) {
+        size_t size_2d = M_ * nd;
+        size_t size_3d = M_ * M_ * nd;
+
+        a_data.assign(size_2d, 0.0);
+        c_data.assign(size_2d, 0.0);
+        h_data.assign(size_2d, 0.0);
+        rr_data.assign(size_2d, 0.0);
+
+        b_data.assign(size_3d, 0.0);
+        aa_data.assign(size_3d, 0.0);
+        cc_data.assign(size_3d, 0.0);
+        dd_data.assign(size_3d, 0.0);
+    }
+};
+
 // standard 8-stream Gauss points & weights from cldj_cmn_mod.F90
 constexpr std::array<double, M_> EMU = {
     0.06943184420297, 0.33000947820757, 0.66999052179243, 0.93056815579703
