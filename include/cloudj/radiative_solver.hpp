@@ -375,29 +375,19 @@ inline void BLKSLV(
     double& fjbot,
     std::array<double, 5>& fibot,
     int nd,
-    int k_idx             // Current wavelength index
+    int k_idx,            // Current wavelength index
+    Workspace& ws         // Persistent pre-allocated workspace reference
 ) {
-    // Local matrix buffers
-    std::vector<double> a_data(M_ * nd, 0.0);
-    std::vector<double> c_data(M_ * nd, 0.0);
-    std::vector<double> h_data(M_ * nd, 0.0);
-    std::vector<double> rr_data(M_ * nd, 0.0);
+    // Create mdspan wrappers directly mapping over persistent workspace buffers (zero allocation)
+    mdspan_2d_mut a(ws.a_data.data(), M_, nd);
+    mdspan_2d_mut c(ws.c_data.data(), M_, nd);
+    mdspan_2d_mut h(ws.h_data.data(), M_, nd);
+    mdspan_2d_mut rr(ws.rr_data.data(), M_, nd);
 
-    std::vector<double> b_data(M_ * M_ * nd, 0.0);
-    std::vector<double> aa_data(M_ * M_ * nd, 0.0);
-    std::vector<double> cc_data(M_ * M_ * nd, 0.0);
-    std::vector<double> dd_data(M_ * M_ * nd, 0.0);
-
-    // Create mdspan wrappers
-    mdspan_2d_mut a(a_data.data(), M_, nd);
-    mdspan_2d_mut c(c_data.data(), M_, nd);
-    mdspan_2d_mut h(h_data.data(), M_, nd);
-    mdspan_2d_mut rr(rr_data.data(), M_, nd);
-
-    mdspan_3d_mut b(b_data.data(), M_, M_, nd);
-    mdspan_3d_mut aa(aa_data.data(), M_, M_, nd);
-    mdspan_3d_mut cc(cc_data.data(), M_, M_, nd);
-    mdspan_3d_mut dd(dd_data.data(), M_, M_, nd);
+    mdspan_3d_mut b(ws.b_data.data(), M_, M_, nd);
+    mdspan_3d_mut aa(ws.aa_data.data(), M_, M_, nd);
+    mdspan_3d_mut cc(ws.cc_data.data(), M_, M_, nd);
+    mdspan_3d_mut dd(ws.dd_data.data(), M_, M_, nd);
 
     // Generate block tri-diagonal system
     GEN_ID(pomega, fz, ztau, fsbot, rfl, pm, pm0, b, aa, cc, a, h, c, nd);
