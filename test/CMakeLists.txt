@@ -46,6 +46,7 @@ if(CLOUDJ_CPP_PORT)
   add_executable(test_cpp_math
     ${CMAKE_CURRENT_SOURCE_DIR}/../tests/cpp/test_cpp_math.cpp
   )
+  target_compile_definitions(test_cpp_math PRIVATE CLOUDJ_GPU_MODE)
   set_target_properties(test_cpp_math PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
   )
