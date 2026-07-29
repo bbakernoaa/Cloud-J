@@ -19,6 +19,7 @@ namespace CloudJ {
 class Engine {
 private:
     Photolysis::SpecData spec_data;
+    RadiativeSolver::Workspace solver_ws;
     
 public:
     Engine() {
@@ -52,6 +53,8 @@ public:
         // Define J-values output layout
         OutputRates rates;
         rates.j_values.assign(lu, std::vector<double>(spec_data.njx, 0.0));
+        
+        solver_ws.resize(lu);
         
         // Check for dark conditions (SZA > 98.0 deg matching original cldj_fjx_sub_mod.F90 limit)
         if (solar_zenith_angle > 98.0) {
