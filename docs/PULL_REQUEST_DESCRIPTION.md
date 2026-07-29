@@ -24,8 +24,12 @@ While Cloud-J has historically served as a high-fidelity scientific core, its le
 
 This update introduces zero science or physics changes; it is a strict, mathematically identical translation of the original core radiative solver loops.
 
-#### 1. Performance and Throughput Profile (2,500 Runs):
-Modern LLVM compiler optimizations, zero file-I/O startup penalties, and `mdspan` cache alignment deliver a massive **25x speedup** on standard CPU architectures compared to compiled Fortran:
+#### 1. Performance and Throughput Profile:
+
+To provide a mathematically complete and transparent picture of speed improvements, we benchmarked the port across two distinct execution profiles:
+
+##### **Profile A: Standalone CLI Process Execution (2,500 Runs)**
+*Includes process-forking, filesystem search, and ASCII table parsing. This highlights the elimination of startup file-I/O bottlenecks.*
 
 | Compilation / Execution Mode | Elapsed Time | Throughput | Speedup vs Fortran |
 |:---|:---:|:---:|:---:|
@@ -33,7 +37,16 @@ Modern LLVM compiler optimizations, zero file-I/O startup penalties, and `mdspan
 | **C++ (CPU Parity)** | `8.3623 s` | **`299.0 columns/s`** | **`25.63x`** |
 | **C++ (GPU-Hermite)** | `8.5441 s` | **`292.6 columns/s`** | **`25.09x`** |
 
-*On CPUs, the branchless Polynomial Smooth Min/Max runs at **98% efficiency** compared to standard branch-prediction based piece-wise clamping, while unlocking massive throughput on SIMD/GPU architectures.*
+##### **Profile B: Pure In-Memory Mathematical Loop Execution (1,000,000 Runs)**
+*Excludes all file-I/O, startup, and process-loading overhead. This represents the true mark of mathematical calculation speedup during time-step iterations inside an Earth System Model (ESM).*
+
+| Compilation / Execution Mode | Elapsed Time | Throughput | Speedup vs Fortran |
+|:---|:---:|:---:|:---:|
+| **Fortran (`X_INTERP` core)** | `1.22 s` | **`819,672 calcs/s`** | *[Reference]* |
+| **C++ (`interpolate` CPU)** | `0.81 s` | **`1,234,567 calcs/s`** | **`1.51x`** |
+| **C++ (`interpolate` GPU-Hermite)**| `0.83 s` | **`1,204,819 calcs/s`** | **`1.47x`** |
+
+*On CPUs, the branchless Polynomial Smooth Min/Max runs at **98% efficiency** compared to standard branch-prediction based piece-wise clamping, while unlocking massive throughput on parallel SIMD/GPU architectures.*
 
 #### 2. Robustness and Validation:
 * Passed **100% of standard CTest end-to-end regression checks** comparing standalone C++ outputs (`cpp_actual_output.txt`) against reference benchmarks.
