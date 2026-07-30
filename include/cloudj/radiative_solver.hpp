@@ -375,6 +375,37 @@ inline void solve_lu_4x4(double E[M_][M_]) {
 }
 
 #if defined(CLOUDJ_USE_PCR)
+// High-performance 4x4 matrix multiplication helper
+inline void mat_mult_4x4(const double X[M_][M_], const double Y[M_][M_], double Z[M_][M_]) {
+    CLOUDJ_UNROLL_4
+    for (int i = 0; i < M_; ++i) {
+        CLOUDJ_UNROLL_4
+        for (int j = 0; j < M_; ++j) {
+            Z[i][j] = X[i][0] * Y[0][j] + X[i][1] * Y[1][j] + X[i][2] * Y[2][j] + X[i][3] * Y[3][j];
+        }
+    }
+}
+
+// High-performance 4x4 matrix by 4-vector multiplication helper
+inline void mat_vec_mult_4(const double X[M_][M_], const double V[M_], double R[M_]) {
+    CLOUDJ_UNROLL_4
+    for (int i = 0; i < M_; ++i) {
+        R[i] = X[i][0] * V[0] + X[i][1] * V[1] + X[i][2] * V[2] + X[i][3] * V[3];
+    }
+}
+
+// Inverts a 4x4 matrix in-place using our optimized division-free LU solver
+inline void invert_matrix_4x4_helper(const double B[M_][M_], double invB[M_][M_]) {
+    CLOUDJ_UNROLL_4
+    for (int i = 0; i < M_; ++i) {
+        CLOUDJ_UNROLL_4
+        for (int j = 0; j < M_; ++j) {
+            invB[i][j] = B[i][j];
+        }
+    }
+    solve_lu_4x4(invB);
+}
+
 inline void solve_pcr(
     mdspan_2d_mut fj,
     mdspan_2d pomega,
@@ -391,7 +422,7 @@ inline void solve_pcr(
     int k_idx,
     Workspace& ws
 ) {
-    // Create mdspan wrappers directly mapping over persistent workspace buffers (zero allocation)
+    // Create temporary block-tridiagonal views to assemble the global system coefficients
     mdspan_2d_mut a(ws.a_data.data(), M_, nd);
     mdspan_2d_mut c(ws.c_data.data(), M_, nd);
     mdspan_2d_mut h(ws.h_data.data(), M_, nd);
@@ -402,115 +433,266 @@ inline void solve_pcr(
     mdspan_3d_mut cc(ws.cc_data.data(), M_, M_, nd);
     mdspan_3d_mut dd(ws.dd_data.data(), M_, M_, nd);
 
-    // Generate block tri-diagonal system
+    // Generate block tri-diagonal system coefficients (a, b, cc, c)
     GEN_ID(pomega, fz, ztau, fsbot, rfl, pm, pm0, b, aa, cc, a, h, c, nd);
 
-    // UPPER BOUNDARY L=1 (0-based: l=0)
-    double E[M_][M_];
-    CLOUDJ_UNROLL_4
-    for (int j = 0; j < M_; ++j) {
+    // Setup persistent Parallel Cyclic Reduction coefficient scratchpad vectors
+    // To ensure zero allocation at runtime, we can utilize the dd_data and b_data workspace pools 
+    // or allocate small temporary buffers since this is CPU-forced testing.
+    std::vector<double> A_pcr(M_ * M_ * nd, 0.0);
+    std::vector<double> B_pcr(M_ * M_ * nd, 0.0);
+    std::vector<double> C_pcr(M_ * M_ * nd, 0.0);
+    std::vector<double> D_pcr(M_ * nd, 0.0);
+
+    mdspan_3d_mut A_v(A_pcr.data(), M_, M_, nd);
+    mdspan_3d_mut B_v(B_pcr.data(), M_, M_, nd);
+    mdspan_3d_mut C_v(C_pcr.data(), M_, M_, nd);
+    mdspan_2d_mut D_v(D_pcr.data(), M_, nd);
+
+    // Initialize PCR matrices
+    for (int l = 0; l < nd; ++l) {
         CLOUDJ_UNROLL_4
         for (int i = 0; i < M_; ++i) {
-            E[i][j] = b(i, j, 0);
+            D_v(i, l) = c(i, l);
+            // a is diagonal of size 4 representing lower diagonal
+            A_v(i, i, l) = a(i, l);
+            CLOUDJ_UNROLL_4
+            for (int j = 0; j < M_; ++j) {
+                B_v(i, j, l) = b(i, j, l);
+                C_v(i, j, l) = cc(i, j, l);
+            }
         }
     }
 
-    solve_lu_4x4(E);
-
-    CLOUDJ_UNROLL_4
-    for (int j = 0; j < M_; ++j) {
-        CLOUDJ_UNROLL_4
-        for (int i = 0; i < M_; ++i) {
-            dd(i, j, 0) = -E[i][0] * cc(0, j, 0) - E[i][1] * cc(1, j, 0) -
-                          E[i][2] * cc(2, j, 0) - E[i][3] * cc(3, j, 0);
-        }
-        h(j, 0) = E[j][0] * c(0, 0) + E[j][1] * c(1, 0) +
-                  E[j][2] * c(2, 0) + E[j][3] * c(3, 0);
-    }
-
-    // FORWARD ELIMINATION
-    for (int l = 1; l < nd - 1; ++l) {
-        CLOUDJ_UNROLL_4
-        for (int j = 0; j < M_; ++j) {
-            CLOUDJ_UNROLL_4
-            for (int i = 0; i < M_; ++i) {
-                b(i, j, l) += a(i, l) * dd(i, j, l - 1);
-            }
-        }
-        CLOUDJ_UNROLL_4
-        for (int j = 0; j < M_; ++j) {
-            c(j, l) += a(j, l) * h(j, l - 1);
-        }
-
-        CLOUDJ_UNROLL_4
-        for (int j = 0; j < M_; ++j) {
-            CLOUDJ_UNROLL_4
-            for (int i = 0; i < M_; ++i) {
-                E[i][j] = b(i, j, l);
-            }
-        }
-
-        solve_lu_4x4(E);
-
-        CLOUDJ_UNROLL_4
-        for (int j = 0; j < M_; ++j) {
-            CLOUDJ_UNROLL_4
-            for (int i = 0; i < M_; ++i) {
-                dd(i, j, l) = -E[i][j] * c(j, l);
-            }
-            h(j, l) = E[j][0] * c(0, l) + E[j][1] * c(1, l) +
-                      E[j][2] * c(2, l) + E[j][3] * c(3, l);
-        }
-    }
-
-    // LOWER BOUNDARY L=N (0-based: l_last = nd-1)
+    // Boundary conditions adjustments for Thomas equivalence
+    // Thomas boundary elements are already generated in GEN_ID. We adjust lower boundary directly.
     int l_last = nd - 1;
-    CLOUDJ_UNROLL_4
-    for (int j = 0; j < M_; ++j) {
-        CLOUDJ_UNROLL_4
-        for (int i = 0; i < M_; ++i) {
-            b(i, j, l_last) += aa(i, 0, l_last) * dd(0, j, l_last - 1) +
-                               aa(i, 1, l_last) * dd(1, j, l_last - 1) +
-                               aa(i, 2, l_last) * dd(2, j, l_last - 1) +
-                               aa(i, 3, l_last) * dd(3, j, l_last - 1);
-        }
-    }
-    CLOUDJ_UNROLL_4
-    for (int j = 0; j < M_; ++j) {
-        c(j, l_last) += aa(j, 0, l_last) * h(0, l_last - 1) +
-                        aa(j, 1, l_last) * h(1, l_last - 1) +
-                        aa(j, 2, l_last) * h(2, l_last - 1) +
-                        aa(j, 3, l_last) * h(3, l_last - 1);
-    }
-
-    CLOUDJ_UNROLL_4
-    for (int j = 0; j < M_; ++j) {
-        CLOUDJ_UNROLL_4
-        for (int i = 0; i < M_; ++i) {
-            E[i][j] = b(i, j, l_last);
-        }
-    }
-
-    solve_lu_4x4(E);
-
-    CLOUDJ_UNROLL_4
-    for (int j = 0; j < M_; ++j) {
-        rr(j, l_last) = E[j][0] * c(0, l_last) + E[j][1] * c(1, l_last) +
-                        E[j][2] * c(2, l_last) + E[j][3] * c(3, l_last);
-    }
-
-    // BACK SUBSTITUTION
-    for (int l = nd - 2; l >= 0; --l) {
-        CLOUDJ_UNROLL_4
+    for (int i = 0; i < M_; ++i) {
         for (int j = 0; j < M_; ++j) {
-            rr(j, l) = h(j, l) + dd(j, 0, l) * rr(0, l + 1) +
-                                 dd(j, 1, l) * rr(1, l + 1) +
-                                 dd(j, 2, l) * rr(2, l + 1) +
-                                 dd(j, 3, l) * rr(3, l + 1);
+            A_v(i, j, l_last) = aa(i, j, l_last);
         }
     }
 
-    // Extract boundaries
+    // Execute O(log N) stride-reduction stages
+    int stages = std::ceil(std::log2(nd));
+    for (int step = 0; step < stages; ++step) {
+        int stride = 1 << step;
+
+        std::vector<double> A_next(M_ * M_ * nd, 0.0);
+        std::vector<double> B_next(M_ * M_ * nd, 0.0);
+        std::vector<double> C_next(M_ * M_ * nd, 0.0);
+        std::vector<double> D_next(M_ * nd, 0.0);
+
+        mdspan_3d_mut An(A_next.data(), M_, M_, nd);
+        mdspan_3d_mut Bn(B_next.data(), M_, M_, nd);
+        mdspan_3d_mut Cn(C_next.data(), M_, M_, nd);
+        mdspan_2d_mut Dn(D_next.data(), M_, nd);
+
+        for (int l = 0; l < nd; ++l) {
+            double alpha[M_][M_] = {0};
+            double beta[M_][M_]  = {0};
+
+            // 1. Calculate alpha = - A_l * B_{l-stride}^-1
+            if (l - stride >= 0) {
+                double Bl_left[M_][M_];
+                CLOUDJ_UNROLL_4
+                for (int i = 0; i < M_; ++i) {
+                    CLOUDJ_UNROLL_4
+                    for (int j = 0; j < M_; ++j) {
+                        Bl_left[i][j] = B_v(i, j, l - stride);
+                    }
+                }
+                double invBl_left[M_][M_];
+                invert_matrix_4x4_helper(Bl_left, invBl_left);
+
+                double Al[M_][M_];
+                CLOUDJ_UNROLL_4
+                for (int i = 0; i < M_; ++i) {
+                    CLOUDJ_UNROLL_4
+                    for (int j = 0; j < M_; ++j) {
+                        Al[i][j] = A_v(i, j, l);
+                    }
+                }
+                double temp[M_][M_];
+                mat_mult_4x4(Al, invBl_left, temp);
+                CLOUDJ_UNROLL_4
+                for (int i = 0; i < M_; ++i) {
+                    CLOUDJ_UNROLL_4
+                    for (int j = 0; j < M_; ++j) {
+                        alpha[i][j] = -temp[i][j];
+                    }
+                }
+            }
+
+            // 2. Calculate beta = - C_l * B_{l+stride}^-1
+            if (l + stride < nd) {
+                double Bl_right[M_][M_];
+                CLOUDJ_UNROLL_4
+                for (int i = 0; i < M_; ++i) {
+                    CLOUDJ_UNROLL_4
+                    for (int j = 0; j < M_; ++j) {
+                        Bl_right[i][j] = B_v(i, j, l + stride);
+                    }
+                }
+                double invBl_right[M_][M_];
+                invert_matrix_4x4_helper(Bl_right, invBl_right);
+
+                double Cl[M_][M_];
+                CLOUDJ_UNROLL_4
+                for (int i = 0; i < M_; ++i) {
+                    CLOUDJ_UNROLL_4
+                    for (int j = 0; j < M_; ++j) {
+                        Cl[i][j] = C_v(i, j, l);
+                    }
+                }
+                double temp[M_][M_];
+                mat_mult_4x4(Cl, invBl_right, temp);
+                CLOUDJ_UNROLL_4
+                for (int i = 0; i < M_; ++i) {
+                    CLOUDJ_UNROLL_4
+                    for (int j = 0; j < M_; ++j) {
+                        beta[i][j] = -temp[i][j];
+                    }
+                }
+            }
+
+            // 3. Compute new coefficients (An, Bn, Cn, Dn)
+            // Bn = B_l + alpha * C_{l-stride} + beta * A_{l+stride}
+            double term1[M_][M_] = {0};
+            double term2[M_][M_] = {0};
+            if (l - stride >= 0) {
+                double Cl_left[M_][M_];
+                CLOUDJ_UNROLL_4
+                for (int i = 0; i < M_; ++i) {
+                    CLOUDJ_UNROLL_4
+                    for (int j = 0; j < M_; ++j) {
+                        Cl_left[i][j] = C_v(i, j, l - stride);
+                    }
+                }
+                mat_mult_4x4(alpha, Cl_left, term1);
+            }
+            if (l + stride < nd) {
+                double Al_right[M_][M_];
+                CLOUDJ_UNROLL_4
+                for (int i = 0; i < M_; ++i) {
+                    CLOUDJ_UNROLL_4
+                    for (int j = 0; j < M_; ++j) {
+                        Al_right[i][j] = A_v(i, j, l + stride);
+                    }
+                }
+                mat_mult_4x4(beta, Al_right, term2);
+            }
+
+            CLOUDJ_UNROLL_4
+            for (int i = 0; i < M_; ++i) {
+                CLOUDJ_UNROLL_4
+                for (int j = 0; j < M_; ++j) {
+                    Bn(i, j, l) = B_v(i, j, l) + term1[i][j] + term2[i][j];
+                }
+            }
+
+            // An = alpha * A_{l-stride}
+            if (l - stride >= 0) {
+                double Al_left[M_][M_];
+                CLOUDJ_UNROLL_4
+                for (int i = 0; i < M_; ++i) {
+                    CLOUDJ_UNROLL_4
+                    for (int j = 0; j < M_; ++j) {
+                        Al_left[i][j] = A_v(i, j, l - stride);
+                    }
+                }
+                double temp[M_][M_];
+                mat_mult_4x4(alpha, Al_left, temp);
+                CLOUDJ_UNROLL_4
+                for (int i = 0; i < M_; ++i) {
+                    CLOUDJ_UNROLL_4
+                    for (int j = 0; j < M_; ++j) {
+                        An(i, j, l) = temp[i][j];
+                    }
+                }
+            }
+
+            // Cn = beta * C_{l+stride}
+            if (l + stride < nd) {
+                double Cl_right[M_][M_];
+                CLOUDJ_UNROLL_4
+                for (int i = 0; i < M_; ++i) {
+                    CLOUDJ_UNROLL_4
+                    for (int j = 0; j < M_; ++j) {
+                        Cl_right[i][j] = C_v(i, j, l + stride);
+                    }
+                }
+                double temp[M_][M_];
+                mat_mult_4x4(beta, Cl_right, temp);
+                CLOUDJ_UNROLL_4
+                for (int i = 0; i < M_; ++i) {
+                    CLOUDJ_UNROLL_4
+                    for (int j = 0; j < M_; ++j) {
+                        Cn(i, j, l) = temp[i][j];
+                    }
+                }
+            }
+
+            // Dn = D_l + alpha * D_{l-stride} + beta * D_{l+stride}
+            double termD1[M_] = {0};
+            double termD2[M_] = {0};
+            if (l - stride >= 0) {
+                double Dl_left[M_];
+                for (int i = 0; i < M_; ++i) Dl_left[i] = D_v(i, l - stride);
+                mat_vec_mult_4(alpha, Dl_left, termD1);
+            }
+            if (l + stride < nd) {
+                double Dl_right[M_];
+                for (int i = 0; i < M_; ++i) Dl_right[i] = D_v(i, l + stride);
+                mat_vec_mult_4(beta, Dl_right, termD2);
+            }
+            CLOUDJ_UNROLL_4
+            for (int i = 0; i < M_; ++i) {
+                Dn(i, l) = D_v(i, l) + termD1[i] + termD2[i];
+            }
+        }
+
+        // Copy new coefficients back to PCR views for next stage
+        for (int l = 0; l < nd; ++l) {
+            CLOUDJ_UNROLL_4
+            for (int i = 0; i < M_; ++i) {
+                D_v(i, l) = Dn(i, l);
+                CLOUDJ_UNROLL_4
+                for (int j = 0; j < M_; ++j) {
+                    A_v(i, j, l) = An(i, j, l);
+                    B_v(i, j, l) = Bn(i, j, l);
+                    C_v(i, j, l) = Cn(i, j, l);
+                }
+            }
+        }
+    }
+
+    // Final Stage: System is completely decoupled! Solve B'_l * X_l = D'_l
+    for (int l = 0; l < nd; ++l) {
+        double B_final[M_][M_];
+        CLOUDJ_UNROLL_4
+        for (int i = 0; i < M_; ++i) {
+            CLOUDJ_UNROLL_4
+            for (int j = 0; j < M_; ++j) {
+                B_final[i][j] = B_v(i, j, l);
+            }
+        }
+        double invB_final[M_][M_];
+        invert_matrix_4x4_helper(B_final, invB_final);
+
+        double D_final[M_];
+        for (int i = 0; i < M_; ++i) D_final[i] = D_v(i, l);
+
+        double X_final[M_];
+        mat_vec_mult_4(invB_final, D_final, X_final);
+
+        CLOUDJ_UNROLL_4
+        for (int i = 0; i < M_; ++i) {
+            rr(i, l) = X_final[i];
+        }
+    }
+
+    // Extract boundary fluxes and populate output J-values
     fjtop = 0.0;
     fjbot = 0.0;
     CLOUDJ_UNROLL_4
