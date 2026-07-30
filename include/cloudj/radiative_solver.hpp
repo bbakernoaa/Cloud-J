@@ -69,6 +69,22 @@ using mdspan_3d_mut = std::experimental::mdspan<double, std::experimental::dexte
 using mdspan_2d_mut = std::experimental::mdspan<double, std::experimental::dextents<size_t, 2>, std::experimental::layout_left>;
 
 /**
+ * @brief Calculates ORDINARY Legendre functions of X
+ * from P[0] = PL[0] = 1, P[1] = X, .... P[N-1] = PL[N-1]
+ * Translates subroutine LEGND0 in cldj_fjx_sub_mod.F90.
+ */
+inline void LEGND0(double X, double PL[], int N) {
+    PL[0] = 1.0;
+    if (N > 1) {
+        PL[1] = X;
+        for (int i = 2; i < N; ++i) {
+            double den = static_cast<double>(i);
+            PL[i] = PL[i - 1] * X * (2.0 - 1.0 / den) - PL[i - 2] * (1.0 - 1.0 / den);
+        }
+    }
+}
+
+/**
  * @brief Generates coefficient matrices for the block tri-diagonal system.
  * Matches GEN_ID in cldj_fjx_sub_mod.F90.
  */
@@ -870,6 +886,67 @@ inline void BLKSLV(
     fibot[4] = sumbx;
     for (int j = 0; j < 4; ++j) {
         fibot[j] = 2.0 * rr(j, l_last) - sumbx;
+    }
+}
+
+/**
+ * @brief Scattered flux orchestrator
+ * Translates subroutine MIESCT in cldj_fjx_sub_mod.F90.
+ */
+inline void MIESCT(
+    mdspan_2d_mut fj,     // (N_, W_+W_r)
+    mdspan_1d_mut fjtop,  // (W_+W_r)
+    mdspan_1d_mut fjbot,  // (W_+W_r)
+    mdspan_2d_mut fibot,  // (5, W_+W_r)
+    mdspan_3d_mut pomega, // (M2_, N_, W_) (from Engine)
+    mdspan_2d_mut fz,     // (N_, W_) (from Engine)
+    mdspan_2d_mut ztau,   // (N_, W_) (from Engine)
+    mdspan_1d fsbot,      // (W_)
+    mdspan_2d rfl,        // (5, W_)
+    double u0,
+    int nd,
+    Workspace& ws         // Persistent pre-allocated workspace reference
+) {
+    double pm[M_][M2_];
+    double pm0[M2_];
+
+    for (int i = 0; i < M_; ++i) {
+        LEGND0(EMU[i], pm0, M2_);
+        for (int im = 0; im < M2_; ++im) {
+            pm[i][im] = pm0[im];
+        }
+    }
+
+    // Note that U0 scattering does not change with altitude
+    LEGND0(-u0, pm0, M2_);
+    for (int im = 0; im < M2_; ++im) {
+        pm0[im] = 0.25 * pm0[im];
+    }
+
+    // Execute the block solver iteratively for each wavelength bin
+    for (int k_idx = 0; k_idx < Photolysis::W_; ++k_idx) {
+        // Create views for the current wavelength slice to pass into BLKSLV
+        mdspan_2d_mut pomega_slice(pomega.data_handle() + k_idx * (M2_ * nd), M2_, nd);
+        mdspan_1d fz_slice(fz.data_handle() + k_idx * nd, nd);
+        mdspan_1d ztau_slice(ztau.data_handle() + k_idx * nd, nd);
+
+        // Map rfl array for the single wavelength
+        std::array<double, 5> rfl_slice;
+        for (int i = 0; i < 5; ++i) {
+            rfl_slice[i] = rfl(i, k_idx);
+        }
+
+        std::array<double, 5> fibot_slice;
+        double fjtop_val;
+        double fjbot_val;
+
+        BLKSLV(fj, pomega_slice, fz_slice, ztau_slice, fsbot(k_idx), rfl_slice, pm, pm0, fjtop_val, fjbot_val, fibot_slice, nd, k_idx, ws);
+
+        fjtop(k_idx) = fjtop_val;
+        fjbot(k_idx) = fjbot_val;
+        for (int i = 0; i < 5; ++i) {
+            fibot(i, k_idx) = fibot_slice[i];
+        }
     }
 }
 
