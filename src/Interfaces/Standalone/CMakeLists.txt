@@ -29,7 +29,7 @@ if(CLOUDJ_CPP_PORT)
         
         option(CLOUDJ_GPU_MODE_BENCH "Compile C++ standalone in GPU Hermite spline mode" OFF)
         if(CLOUDJ_GPU_MODE_BENCH)
-                target_compile_definitions(cloudj_standalone_cpp PRIVATE CLOUDJ_GPU_MODE)
+                target_compile_definitions(cloudj_standalone_cpp PRIVATE CLOUDJ_GPU_MODE CLOUDJ_USE_FAST_EXP)
         endif()
 
         if(WIN32)

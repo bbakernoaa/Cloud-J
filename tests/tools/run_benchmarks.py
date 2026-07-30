@@ -65,7 +65,7 @@ def run_benchmarks(iterations):
         build_dir = "build"
         
     try:
-        subprocess.run(["cmake", "-DCLOUDJ_GPU_MODE_BENCH=ON", ".."], cwd=build_dir, check=True, stdout=subprocess.PIPE)
+        subprocess.run(["cmake", "-DCLOUDJ_GPU_MODE_BENCH=ON", "-DCLOUDJ_USE_FAST_EXP=ON", ".."], cwd=build_dir, check=True, stdout=subprocess.PIPE)
         subprocess.run(["make", "-j"], cwd=build_dir, check=True, stdout=subprocess.PIPE)
     except subprocess.CalledProcessError as e:
         print(f"Error: Re-compiling in GPU mode failed: {e}", file=sys.stderr)
@@ -78,7 +78,7 @@ def run_benchmarks(iterations):
     # 4. Compile C++ binary in PCR mode and benchmark
     print("\nRe-compiling C++ Standalone with CLOUDJ_USE_PCR active for benchmark...")
     try:
-        subprocess.run(["cmake", "-DCLOUDJ_GPU_MODE_BENCH=OFF", "-DCLOUDJ_USE_PCR=ON", ".."], cwd=build_dir, check=True, stdout=subprocess.PIPE)
+        subprocess.run(["cmake", "-DCLOUDJ_GPU_MODE_BENCH=OFF", "-DCLOUDJ_USE_PCR=ON", "-DCLOUDJ_USE_FAST_EXP=ON", ".."], cwd=build_dir, check=True, stdout=subprocess.PIPE)
         subprocess.run(["make", "-j"], cwd=build_dir, check=True, stdout=subprocess.PIPE)
     except subprocess.CalledProcessError as e:
         print(f"Error: Re-compiling in PCR mode failed: {e}", file=sys.stderr)
@@ -91,7 +91,7 @@ def run_benchmarks(iterations):
     # Restore default CPU Parity mode compilation to keep repo in default state
     print("\nRestoring default CPU Parity compilation mode...")
     try:
-        subprocess.run(["cmake", "-DCLOUDJ_GPU_MODE_BENCH=OFF", "-DCLOUDJ_USE_PCR=OFF", ".."], cwd=build_dir, check=True, stdout=subprocess.PIPE)
+        subprocess.run(["cmake", "-DCLOUDJ_GPU_MODE_BENCH=OFF", "-DCLOUDJ_USE_PCR=OFF", "-DCLOUDJ_USE_FAST_EXP=OFF", ".."], cwd=build_dir, check=True, stdout=subprocess.PIPE)
         subprocess.run(["make", "-j"], cwd=build_dir, check=True, stdout=subprocess.PIPE)
     except subprocess.CalledProcessError as e:
          print(f"Warning: Failed to restore default compilation: {e}", file=sys.stderr)

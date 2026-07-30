@@ -43,6 +43,11 @@ if(CLOUDJ_CPP_PORT)
     if(CLOUDJ_USE_PCR)
         add_definitions(-DCLOUDJ_USE_PCR)
     endif()
+
+    option(CLOUDJ_USE_FAST_EXP "Enable high-speed branchless fast_exp approximation in OPMIE" OFF)
+    if(CLOUDJ_USE_FAST_EXP)
+        add_definitions(-DCLOUDJ_USE_FAST_EXP)
+    endif()
 endif()
 
 #-----------------------------------------------------------------------------
