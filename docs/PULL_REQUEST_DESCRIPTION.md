@@ -28,14 +28,15 @@ This update introduces zero science or physics changes; it is a strict, mathemat
 
 To provide a mathematically complete and transparent picture of speed improvements, we benchmarked the port across two distinct execution profiles:
 
-##### **Profile A: Standalone CLI Process Execution (2,500 Runs)**
+##### **Profile A: Standalone CLI Process Execution (100 Runs)**
 *Includes process-forking, filesystem search, and ASCII table parsing. This highlights the elimination of startup file-I/O bottlenecks.*
 
 | Compilation / Execution Mode | Elapsed Time | Throughput | Speedup vs Fortran |
 |:---|:---:|:---:|:---:|
-| **Fortran (gfortran)** | `214.3349 s` | **`11.7 columns/s`** | *[Reference]* |
-| **C++ (CPU Parity)** | `8.3623 s` | **`299.0 columns/s`** | **`25.63x`** |
-| **C++ (GPU-Hermite)** | `8.5441 s` | **`292.6 columns/s`** | **`25.09x`** |
+| **Fortran (gfortran)** | `7.3956 s` | **`13.5 columns/s`** | *[Reference]* |
+| **C++ (CPU Parity)** | `0.2754 s` | **`363.1 columns/s`** | **`26.85x`** |
+| **C++ (GPU-Hermite)** | `0.2786 s` | **`358.9 columns/s`** | **`26.55x`** |
+| **C++ (PCR Solver)** | `0.3024 s` | **`330.7 columns/s`** | **`24.46x`** |
 
 ##### **Profile B: Pure In-Memory Mathematical Loop Execution (1,000,000 Runs)**
 *Excludes all file-I/O, startup, and process-loading overhead. This represents the true mark of mathematical calculation speedup during time-step iterations inside an Earth System Model (ESM).*
