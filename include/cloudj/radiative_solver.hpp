@@ -907,6 +907,15 @@ inline double fast_exp(double x) {
     return c0 + x * (c1 + x * (c2 + x * (c3 + x * c4)));
 }
 
+// Inline dispatcher to select between standard std::exp and optimized fast_exp
+inline double exp_eval(double x) {
+#if defined(CLOUDJ_USE_FAST_EXP)
+    return fast_exp(x);
+#else
+    return std::exp(x);
+#endif
+}
+
 // Forward declaration of MIESCT
 inline void MIESCT(
     mdspan_2d_mut fj,     // (N_, W_+W_r)
