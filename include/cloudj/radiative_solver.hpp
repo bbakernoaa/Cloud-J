@@ -374,6 +374,162 @@ inline void solve_lu_4x4(double E[M_][M_]) {
     E[3][2] = temp[3][3] * temp[3][2];
 }
 
+#if defined(CLOUDJ_USE_PCR)
+inline void solve_pcr(
+    mdspan_2d_mut fj,
+    mdspan_2d pomega,
+    mdspan_1d fz,
+    mdspan_1d ztau,
+    double fsbot,
+    const std::array<double, 5>& rfl,
+    const double pm[M_][M2_],
+    const double pm0[M2_],
+    double& fjtop,
+    double& fjbot,
+    std::array<double, 5>& fibot,
+    int nd,
+    int k_idx,
+    Workspace& ws
+) {
+    // Create mdspan wrappers directly mapping over persistent workspace buffers (zero allocation)
+    mdspan_2d_mut a(ws.a_data.data(), M_, nd);
+    mdspan_2d_mut c(ws.c_data.data(), M_, nd);
+    mdspan_2d_mut h(ws.h_data.data(), M_, nd);
+    mdspan_2d_mut rr(ws.rr_data.data(), M_, nd);
+
+    mdspan_3d_mut b(ws.b_data.data(), M_, M_, nd);
+    mdspan_3d_mut aa(ws.aa_data.data(), M_, M_, nd);
+    mdspan_3d_mut cc(ws.cc_data.data(), M_, M_, nd);
+    mdspan_3d_mut dd(ws.dd_data.data(), M_, M_, nd);
+
+    // Generate block tri-diagonal system
+    GEN_ID(pomega, fz, ztau, fsbot, rfl, pm, pm0, b, aa, cc, a, h, c, nd);
+
+    // UPPER BOUNDARY L=1 (0-based: l=0)
+    double E[M_][M_];
+    CLOUDJ_UNROLL_4
+    for (int j = 0; j < M_; ++j) {
+        CLOUDJ_UNROLL_4
+        for (int i = 0; i < M_; ++i) {
+            E[i][j] = b(i, j, 0);
+        }
+    }
+
+    solve_lu_4x4(E);
+
+    CLOUDJ_UNROLL_4
+    for (int j = 0; j < M_; ++j) {
+        CLOUDJ_UNROLL_4
+        for (int i = 0; i < M_; ++i) {
+            dd(i, j, 0) = -E[i][0] * cc(0, j, 0) - E[i][1] * cc(1, j, 0) -
+                          E[i][2] * cc(2, j, 0) - E[i][3] * cc(3, j, 0);
+        }
+        h(j, 0) = E[j][0] * c(0, 0) + E[j][1] * c(1, 0) +
+                  E[j][2] * c(2, 0) + E[j][3] * c(3, 0);
+    }
+
+    // FORWARD ELIMINATION
+    for (int l = 1; l < nd - 1; ++l) {
+        CLOUDJ_UNROLL_4
+        for (int j = 0; j < M_; ++j) {
+            CLOUDJ_UNROLL_4
+            for (int i = 0; i < M_; ++i) {
+                b(i, j, l) += a(i, l) * dd(i, j, l - 1);
+            }
+        }
+        CLOUDJ_UNROLL_4
+        for (int j = 0; j < M_; ++j) {
+            c(j, l) += a(j, l) * h(j, l - 1);
+        }
+
+        CLOUDJ_UNROLL_4
+        for (int j = 0; j < M_; ++j) {
+            CLOUDJ_UNROLL_4
+            for (int i = 0; i < M_; ++i) {
+                E[i][j] = b(i, j, l);
+            }
+        }
+
+        solve_lu_4x4(E);
+
+        CLOUDJ_UNROLL_4
+        for (int j = 0; j < M_; ++j) {
+            CLOUDJ_UNROLL_4
+            for (int i = 0; i < M_; ++i) {
+                dd(i, j, l) = -E[i][j] * c(j, l);
+            }
+            h(j, l) = E[j][0] * c(0, l) + E[j][1] * c(1, l) +
+                      E[j][2] * c(2, l) + E[j][3] * c(3, l);
+        }
+    }
+
+    // LOWER BOUNDARY L=N (0-based: l_last = nd-1)
+    int l_last = nd - 1;
+    CLOUDJ_UNROLL_4
+    for (int j = 0; j < M_; ++j) {
+        CLOUDJ_UNROLL_4
+        for (int i = 0; i < M_; ++i) {
+            b(i, j, l_last) += aa(i, 0, l_last) * dd(0, j, l_last - 1) +
+                               aa(i, 1, l_last) * dd(1, j, l_last - 1) +
+                               aa(i, 2, l_last) * dd(2, j, l_last - 1) +
+                               aa(i, 3, l_last) * dd(3, j, l_last - 1);
+        }
+    }
+    CLOUDJ_UNROLL_4
+    for (int j = 0; j < M_; ++j) {
+        c(j, l_last) += aa(j, 0, l_last) * h(0, l_last - 1) +
+                        aa(j, 1, l_last) * h(1, l_last - 1) +
+                        aa(j, 2, l_last) * h(2, l_last - 1) +
+                        aa(j, 3, l_last) * h(3, l_last - 1);
+    }
+
+    CLOUDJ_UNROLL_4
+    for (int j = 0; j < M_; ++j) {
+        CLOUDJ_UNROLL_4
+        for (int i = 0; i < M_; ++i) {
+            E[i][j] = b(i, j, l_last);
+        }
+    }
+
+    solve_lu_4x4(E);
+
+    CLOUDJ_UNROLL_4
+    for (int j = 0; j < M_; ++j) {
+        rr(j, l_last) = E[j][0] * c(0, l_last) + E[j][1] * c(1, l_last) +
+                        E[j][2] * c(2, l_last) + E[j][3] * c(3, l_last);
+    }
+
+    // BACK SUBSTITUTION
+    for (int l = nd - 2; l >= 0; --l) {
+        CLOUDJ_UNROLL_4
+        for (int j = 0; j < M_; ++j) {
+            rr(j, l) = h(j, l) + dd(j, 0, l) * rr(0, l + 1) +
+                                 dd(j, 1, l) * rr(1, l + 1) +
+                                 dd(j, 2, l) * rr(2, l + 1) +
+                                 dd(j, 3, l) * rr(3, l + 1);
+        }
+    }
+
+    // Extract boundaries
+    fjtop = 0.0;
+    fjbot = 0.0;
+    CLOUDJ_UNROLL_4
+    for (int i = 0; i < M_; ++i) {
+        fjtop += rr(i, 0) * WT[i];
+        fjbot += rr(i, l_last) * WT[i];
+    }
+
+    for (int l = 0; l < nd; ++l) {
+        double sum_rr = 0.0;
+        CLOUDJ_UNROLL_4
+        for (int i = 0; i < M_; ++i) {
+            sum_rr += rr(i, l) * WT[i];
+        }
+        fj(l, k_idx) = sum_rr;
+    }
+}
+#endif
+
 /**
  * @brief Main radiative transfer tridiagonal solver logic.
  * Translates subroutine BLKSLV in cldj_fjx_sub_mod.F90.
@@ -394,6 +550,12 @@ inline void BLKSLV(
     int k_idx,            // Current wavelength index
     Workspace& ws         // Persistent pre-allocated workspace reference
 ) {
+#if defined(CLOUDJ_USE_PCR)
+    // Redirect cleanly to our Parallel Cyclic Reduction solver backend
+    solve_pcr(fj, pomega, fz, ztau, fsbot, rfl, pm, pm0, fjtop, fjbot, fibot, nd, k_idx, ws);
+    return;
+#endif
+
     // Create mdspan wrappers directly mapping over persistent workspace buffers (zero allocation)
     mdspan_2d_mut a(ws.a_data.data(), M_, nd);
     mdspan_2d_mut c(ws.c_data.data(), M_, nd);

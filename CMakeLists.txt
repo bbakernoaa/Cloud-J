@@ -38,6 +38,11 @@ if(CLOUDJ_CPP_PORT)
         find_package(KokkosKernels REQUIRED)
         add_definitions(-DCLOUDJ_USE_KOKKOS)
     endif()
+
+    option(CLOUDJ_USE_PCR "Enable PCR Tridiagonal Solver Backend" OFF)
+    if(CLOUDJ_USE_PCR)
+        add_definitions(-DCLOUDJ_USE_PCR)
+    endif()
 endif()
 
 #-----------------------------------------------------------------------------
