@@ -64,34 +64,89 @@ public:
         // Define J-values output layout
         OutputRates rates;
         rates.j_values.assign(lu, std::vector<double>(spec_data.njx, 0.0));
+
+        std::vector<int> jxtra(lu + 1, 0); // No inserted layers for testing
         
-        solver_ws.resize(lu);
+        int l1u = lu + 1;
+        int jaddto = 0;
+        for (int l = 0; l < lu; ++l) {
+            jaddto += jxtra[l];
+        }
+        int nd = 2 * l1u + 2 * jaddto + 1;
+        
+        solver_ws.resize(nd); // Resize persistent workspace to the actual expanded grid size nd!
         
         // Check for dark conditions (SZA > 98.0 deg matching original cldj_fjx_sub_mod.F90 limit)
         if (solar_zenith_angle > 98.0) {
             return rates; // return zero photolysis rates instantly
         }
 
-        // Setup actinic flux integration matrices FFF (flattened contiguous 1D layout)
-        std::vector<double> fff_data(Photolysis::W_ * lu, 0.0);
-        mdspan_2d_mut fff(fff_data.data(), Photolysis::W_, lu);
-        
         double u0 = std::cos(solar_zenith_angle * Context::pi / 180.0);
+
+        // Core OPMIE and MIESCT physical matrices setup
+        constexpr int M2_ = RadiativeSolver::M2_;
+
+        std::vector<double> pomega_data(M2_ * nd * Photolysis::W_, 0.0);
+        std::vector<double> fz_data(nd * Photolysis::W_, 0.0);
+        std::vector<double> ztau_data(nd * Photolysis::W_, 0.0);
         
-        // Core wavelength loops representing standard solar integration steps
-        for (int k = 0; k < Photolysis::W_; ++k) {
-            // Replicate standard actinic flux level approximations for reference profiles
-            for (size_t l = 0; l < lu; ++l) {
-                fff(k, l) = u0 * 1e14; // scale flux based on standard direct solar rays
-            }
-        }
+        RadiativeSolver::mdspan_3d_mut pomega(pomega_data.data(), M2_, nd, Photolysis::W_);
+        mdspan_2d_mut fz(fz_data.data(), nd, Photolysis::W_);
+        mdspan_2d_mut ztau(ztau_data.data(), nd, Photolysis::W_);
+
+        std::vector<double> fjact_data((lu + 1) * Photolysis::W_, 0.0);
+        mdspan_2d_mut fjact(fjact_data.data(), lu + 1, Photolysis::W_);
+        
+        std::vector<double> fjtop_data(Photolysis::W_, 0.0);
+        RadiativeSolver::mdspan_1d_mut fjtop(fjtop_data.data(), Photolysis::W_);
+
+        std::vector<double> fjbot_data(Photolysis::W_, 0.0);
+        RadiativeSolver::mdspan_1d_mut fjbot(fjbot_data.data(), Photolysis::W_);
+
+        std::vector<double> fibot_data(5 * Photolysis::W_, 0.0);
+        mdspan_2d_mut fibot(fibot_data.data(), 5, Photolysis::W_);
+
+        std::vector<double> fsbot_data(Photolysis::W_, 0.0);
+        RadiativeSolver::mdspan_1d_mut fsbot(fsbot_data.data(), Photolysis::W_);
+
+        std::vector<double> fjflx_data((lu + 1) * Photolysis::W_, 0.0);
+        mdspan_2d_mut fjflx(fjflx_data.data(), lu + 1, Photolysis::W_);
+
+        std::vector<double> flxd_data((lu + 1) * Photolysis::W_, 0.0);
+        mdspan_2d_mut flxd(flxd_data.data(), lu + 1, Photolysis::W_);
+
+        std::vector<double> flxd0_data(Photolysis::W_, 0.0);
+        RadiativeSolver::mdspan_1d_mut flxd0(flxd0_data.data(), Photolysis::W_);
+
+        // Setup mock profile scattering physics (with safety padding to support edge-based lookups)
+        std::vector<double> dtaux_data((lu + 1) * Photolysis::W_, 0.1); // Mock optical depths
+        mdspan_2d_mut dtaux(dtaux_data.data(), lu + 1, Photolysis::W_);
+
+        std::vector<double> pomegax_data(M2_ * (lu + 1) * Photolysis::W_, 0.99); // Mock conservative scattering
+        RadiativeSolver::mdspan_3d_mut pomegax(pomegax_data.data(), M2_, lu + 1, Photolysis::W_);
+
+        std::vector<double> rfl_data(5 * Photolysis::W_, 0.05); // Standard albedo
+        mdspan_2d_mut rfl(rfl_data.data(), 5, Photolysis::W_);
+
+        std::vector<double> amf_data((lu + 2) * (lu + 2), 1.0 / u0); // Air mass factor
+        mdspan_2d_mut amf(amf_data.data(), lu + 2, lu + 2);
+
+        std::vector<double> amg_data(lu + 1, 1.0); // Geometric factor
+        RadiativeSolver::mdspan_1d_mut amg(amg_data.data(), lu + 1);
+
+        // Execute full physical solver integration loop
+        RadiativeSolver::OPMIE(
+            dtaux, pomegax, u0, rfl, amf, amg, jxtra,
+            fjact, fjtop, fjbot, fibot, fsbot, fjflx, flxd, flxd0, 
+            lu, solver_ws
+        );
 
         const std::vector<double>& ppj = profile.get_pressures();
         const std::vector<double>& ttj = profile.get_temperatures();
 
         // Invoke JRATET to calculate temperature/pressure interpolated cross sections
-        // and accumulate J-value arrays for the target reactions
-        Photolysis::JRATET(ppj, ttj, fff, rates.j_values, spec_data, lu, spec_data.njx);
+        // Passing the solved mean actinic flux (fjact) to evaluate final J-values
+        Photolysis::JRATET(ppj, ttj, fjact, rates.j_values, spec_data, lu, spec_data.njx);
 
         return rates;
     }

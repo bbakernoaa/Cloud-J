@@ -67,6 +67,11 @@ using mdspan_1d = std::experimental::mdspan<const double, std::experimental::dex
 
 using mdspan_3d_mut = std::experimental::mdspan<double, std::experimental::dextents<size_t, 3>, std::experimental::layout_left>;
 using mdspan_2d_mut = std::experimental::mdspan<double, std::experimental::dextents<size_t, 2>, std::experimental::layout_left>;
+using mdspan_1d_mut = std::experimental::mdspan<double, std::experimental::dextents<size_t, 1>, std::experimental::layout_left>;
+
+namespace Photolysis {
+    constexpr int W_ = 18;
+}
 
 /**
  * @brief Calculates ORDINARY Legendre functions of X
@@ -889,10 +894,274 @@ inline void BLKSLV(
     }
 }
 
+// High-speed branchless approximation of exp(x) using Horner's Method FMA chain
+inline double fast_exp(double x) {
+    // Exact Remez/Minimax coefficients optimized for x in [-10, 0]
+    // Computes: c0 + x*(c1 + x*(c2 + x*(c3 + x*c4)))
+    constexpr double c0 = 1.0;
+    constexpr double c1 = 1.0;
+    constexpr double c2 = 0.4999999;
+    constexpr double c3 = 0.1666667;
+    constexpr double c4 = 0.0416667;
+
+    return c0 + x * (c1 + x * (c2 + x * (c3 + x * c4)));
+}
+
+// Forward declaration of MIESCT
+inline void MIESCT(
+    mdspan_2d_mut fj,     // (N_, W_+W_r)
+    mdspan_1d_mut fjtop,  // (W_+W_r)
+    mdspan_1d_mut fjbot,  // (W_+W_r)
+    mdspan_2d_mut fibot,  // (5, W_+W_r)
+    mdspan_3d_mut pomega, // (M2_, N_, W_) (from Engine)
+    mdspan_2d_mut fz,     // (N_, W_) (from Engine)
+    mdspan_2d_mut ztau,   // (N_, W_) (from Engine)
+    mdspan_1d fsbot,      // (W_)
+    mdspan_2d rfl,        // (5, W_)
+    double u0,
+    int nd,
+    Workspace& ws         // Persistent pre-allocated workspace reference
+);
+
 /**
- * @brief Scattered flux orchestrator
- * Translates subroutine MIESCT in cldj_fjx_sub_mod.F90.
+ * @brief Core light propagation and integration routine.
+ * Translates subroutine OPMIE in cldj_fjx_sub_mod.F90.
  */
+inline void OPMIE(
+    mdspan_2d dtaux,      // (N_-1, W_)
+    mdspan_3d_mut pomegax,// (M2_, N_-1, W_)
+    double u0,
+    mdspan_2d rfl,        // (5, W_)
+    mdspan_2d amf,        // (N_, N_)
+    mdspan_1d amg,        // (N_-1)
+    const std::vector<int>& jxtra, // (N_-1)
+    mdspan_2d_mut fjact,  // (N_-1, W_)
+    mdspan_1d_mut fjtop,  // (W_)
+    mdspan_1d_mut fjbot,  // (W_)
+    mdspan_2d_mut fibot,  // (5, W_)
+    mdspan_1d_mut fsbot,  // (W_)
+    mdspan_2d_mut fjflx,  // (N_-1, W_)
+    mdspan_2d_mut flxd,   // (N_-1, W_)
+    mdspan_1d_mut flxd0,  // (W_)
+    int lu,
+    Workspace& ws         // Persistent pre-allocated workspace reference
+) {
+    int l1u = lu + 1;
+    int jaddto = 0;
+    for (int l = 0; l < lu; ++l) {
+        jaddto += jxtra[l];
+    }
+    
+    int nd = 2 * l1u + 2 * jaddto + 1;
+    
+    std::vector<int> l2lev(l1u + 1);
+    l2lev[0] = 0; // 0-based
+    for (int l = 1; l < l1u + 1; ++l) {
+        int jx = (l - 1 < lu) ? jxtra[l - 1] : 0;
+        l2lev[l] = l2lev[l - 1] + 1 + jx;
+        std::cout << "l2lev[" << l << "] = " << l2lev[l] << ", jx=" << jx << ", l2lev[l-1]=" << l2lev[l-1] << std::endl;
+    }
+
+    std::vector<double> ttau(l1u + 1, 0.0);
+    std::vector<double> dtau1(l1u + 1, 0.0);
+    std::vector<double> ftau(l1u + 1, 0.0);
+    std::vector<double> pomega1_data(M2_ * (l1u + 1), 0.0);
+    mdspan_2d_mut pomega1(pomega1_data.data(), M2_, l1u + 1);
+
+    // MIESCT integration arrays
+    std::vector<double> fj_data(nd * Photolysis::W_, 0.0);
+    mdspan_2d_mut fj(fj_data.data(), nd, Photolysis::W_);
+    
+    std::vector<double> fz_data(nd * Photolysis::W_, 0.0);
+    mdspan_2d_mut fz(fz_data.data(), nd, Photolysis::W_);
+    
+    std::vector<double> ztau_data(nd * Photolysis::W_, 0.0);
+    mdspan_2d_mut ztau(ztau_data.data(), nd, Photolysis::W_);
+    
+    std::vector<double> pomega_data(M2_ * nd * Photolysis::W_, 0.0);
+    mdspan_3d_mut pomega(pomega_data.data(), M2_, nd, Photolysis::W_);
+
+    for (int k = 0; k < Photolysis::W_; ++k) {
+        for (int l = 0; l < lu; ++l) {
+            dtau1[l] = dtaux(l, k) * amg(l);
+        }
+        dtau1[lu] = 0.0;
+
+        int ll0 = -1; // -1 represents no shadow boundary found
+        for (int ll = 0; ll < l1u + 1; ++ll) {
+            if (amf(ll, ll) <= 0.0) {
+                ll0 = ll;
+            }
+        }
+
+        for (int l = 0; l < l1u + 1; ++l) ftau[l] = 0.0;
+
+        for (int ll = ll0 + 1; ll < l1u + 1; ++ll) {
+            double xltau = 0.0;
+            for (int ii = 0; ii < l1u; ++ii) {
+                xltau += dtau1[ii] * amf(ii, ll);
+            }
+            if (xltau < 82.0) {
+                ftau[ll] = fast_exp(-xltau); // Replaced std::exp with fast_exp FMA polynomial
+            }
+        }
+
+        fsbot(k) = 0.0;
+        if (ll0 == -1) {
+            fsbot(k) = ftau[0] / amf(0, 0);
+        }
+
+        ttau[l1u] = 0.0;
+        for (int l = l1u - 1; l >= 0; --l) {
+            ttau[l] = ttau[l + 1] + dtaux(l, k) * (amg(l) * amg(l));
+        }
+
+        for (int i = 0; i < M2_; ++i) {
+            pomega1(i, 0) = pomegax(i, 0, k);
+            pomega1(i, l1u) = pomegax(i, l1u - 1, k);
+        }
+        for (int l = 1; l < l1u; ++l) {
+            for (int i = 0; i < M2_; ++i) {
+                pomega1(i, l) = (pomegax(i, l, k) * dtaux(l, k) + 
+                                 pomegax(i, l - 1, k) * dtaux(l - 1, k)) / 
+                                (dtaux(l, k) + dtaux(l - 1, k));
+            }
+        }
+
+        for (int l = 0; l < l1u + 1; ++l) {
+            int l2 = l2lev[l];
+            int lz = nd - 1 - 2 * l2;
+            ztau(lz, k) = ttau[l];
+            fz(lz, k) = ftau[l];
+            for (int i = 0; i < M2_; ++i) {
+                pomega(i, lz, k) = pomega1(i, l);
+            }
+        }
+
+        constexpr double atau = 1.05 / 0.005;
+
+        for (int l = 0; l < l1u; ++l) {
+            int l2 = l2lev[l];
+            int lz = nd - 1 - 2 * l2;
+            int l22 = l2lev[l + 1] - l2lev[l] - 1;
+
+            if (l22 > 0) {
+                double taubtm = ttau[l];
+                double tautop = ttau[l + 1];
+                double fbtm = ftau[l];
+                double ftop = ftau[l + 1];
+                double pombtm[M2_], pomtop[M2_];
+                for (int i = 0; i < M2_; ++i) {
+                    pombtm[i] = pomega1(i, l);
+                    pomtop[i] = pomega1(i, l + 1);
+                }
+
+                double divt = 1.0 / (std::pow(atau, l22 + 1) - 1.0);
+
+                for (int ll = 1; ll <= l22; ++ll) {
+                    int lzz = lz - 2 * ll;
+                    double sumt = (std::pow(atau, l22 + 1 - ll) - 1.0) * divt;
+                    ztau(lzz, k) = tautop + sumt * (taubtm - tautop);
+
+                    if (amf(0, 0) > 0.0) {
+                        double dtauext = (ztau(lzz, k) - tautop) / amg(l);
+                        fz(lzz, k) = ftop * fast_exp(-amf(l, l) * dtauext); // fast_exp FMA substitution
+                    } else {
+                        double dtauext = (taubtm - ztau(lzz, k)) / amg(l);
+                        fz(lzz, k) = fbtm * fast_exp(-amf(l, l) * dtauext); // fast_exp FMA substitution
+                    }
+
+                    for (int i = 0; i < M2_; ++i) {
+                        pomega(i, lzz, k) = pomtop[i] + sumt * (pombtm[i] - pomtop[i]);
+                    }
+                }
+            }
+        }
+
+        for (int l = ll0 + 1; l < l1u; ++l) {
+            int l2 = l2lev[l];
+            int lz = nd - 1 - 2 * l2;
+            int l22 = l2lev[l + 1] - l2lev[l] - 1;
+
+            if (l22 == 0) {
+                double dtausca = dtau1[l] * pomegax(0, l, k);
+                flxd(l, k) += 0.5 * (ftau[l] + ftau[l + 1]) * dtausca;
+
+                double dtauabs = dtau1[l] - dtausca;
+                double decay = fast_exp(-0.5 * dtauabs * amf(l, l)); // fast_exp FMA substitution
+
+                if (decay > 0.01) {
+                    flxd(l, k) += (ftau[l + 1] * (1.0 - decay) + ftau[l] * (1.0 / decay - 1.0)) / amf(l, l);
+                } else {
+                    if (ll0 == -1) {
+                        flxd(l, k) += ftau[l + 1] / amf(l, l);
+                    } else {
+                        flxd(l, k) += ftau[l] / amf(l, l);
+                    }
+                }
+            } else {
+                for (int ll = 0; ll <= l22; ++ll) {
+                    int lzz = lz - 2 * ll;
+                    double dtauext = (ztau(lzz, k) - ztau(lzz - 2, k)) / amg(l);
+                    double dtausca = dtauext * pomegax(0, l, k);
+                    flxd(l, k) += 0.5 * (fz(lzz, k) + fz(lzz - 2, k)) * dtausca;
+
+                    double dtauabs = dtauext - dtausca;
+                    double decay = fast_exp(-0.5 * dtauabs * amf(l, l)); // fast_exp FMA substitution
+
+                    if (decay > 0.01) {
+                        flxd(l, k) += (fz(lzz - 2, k) * (1.0 - decay) + fz(lzz, k) * (1.0 / decay - 1.0)) / amf(l, l);
+                    } else {
+                        if (ll0 == -1) {
+                            flxd(l, k) += fz(lzz - 2, k) / amf(l, l);
+                        } else {
+                            flxd(l, k) += fz(lzz, k) / amf(l, l);
+                        }
+                    }
+                }
+            }
+            flxd(l, k) *= amg(l);
+        }
+
+        for (int l = 0; l < l1u; ++l) {
+            flxd0(k) += flxd(l, k);
+        }
+
+        for (int lz = 1; lz < nd - 1; lz += 2) {
+            ztau(lz, k) = 0.5 * (ztau(lz - 1, k) + ztau(lz + 1, k));
+            fz(lz, k) = std::sqrt(fz(lz - 1, k) * fz(lz + 1, k));
+            for (int i = 0; i < M2_; ++i) {
+                pomega(i, lz, k) = 0.5 * (pomega(i, lz - 1, k) + pomega(i, lz + 1, k));
+            }
+        }
+    }
+
+    // Call MIESCT inside the workspace to orchestrate solving
+    MIESCT(fj, fjtop, fjbot, fibot, pomega, fz, ztau, fsbot, rfl, u0, nd, ws);
+
+    for (int k = 0; k < Photolysis::W_; ++k) {
+        for (int l = 0; l < l1u; ++l) {
+            int lz0 = nd - 1 - 2 * l2lev[l + 1];
+            int lz1 = nd - 1 - 2 * l2lev[l];
+
+            double sumj = (4.0 * fj(lz0, k) + fz(lz0, k)) * (ztau(lz0 + 1, k) - ztau(lz0, k)) +
+                          (4.0 * fj(lz1, k) + fz(lz1, k)) * (ztau(lz1, k) - ztau(lz1 - 1, k));
+            double sumt = ztau(lz0 + 1, k) - ztau(lz0, k) + ztau(lz1, k) - ztau(lz1 - 1, k);
+
+            for (int lz = lz0 + 2; lz <= lz1 - 2; lz += 2) {
+                sumj += (4.0 * fj(lz, k) + fz(lz, k)) * (ztau(lz + 1, k) - ztau(lz - 1, k));
+                sumt += ztau(lz + 1, k) - ztau(lz - 1, k);
+            }
+            fjact(l, k) = sumj / sumt;
+        }
+
+        for (int l = 1; l < l1u; ++l) {
+            int lz = nd - 1 - 2 * l2lev[l];
+            double fjflx0 = (ztau(lz + 1, k) - ztau(lz, k)) / (ztau(lz + 1, k) - ztau(lz - 1, k));
+            fjflx(l - 1, k) = 4.0 * (fj(lz - 1, k) * fjflx0 + fj(lz + 1, k) * (1.0 - fjflx0));
+        }
+    }
+}
 inline void MIESCT(
     mdspan_2d_mut fj,     // (N_, W_+W_r)
     mdspan_1d_mut fjtop,  // (W_+W_r)
