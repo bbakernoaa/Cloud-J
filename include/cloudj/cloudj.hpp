@@ -128,14 +128,14 @@ public:
     std::vector<double> flxd0_data(Photolysis::W_, 0.0);
     RadiativeSolver::mdspan_1d_mut flxd0(flxd0_data.data(), Photolysis::W_);
 
-    // Setup mock profile scattering physics (with safety padding to support
+    // Setup baseline profile scattering physics (with safety padding to support
     // edge-based lookups)
     std::vector<double> dtaux_data((lu + 1) * Photolysis::W_,
-                                   0.1); // Mock optical depths
+                                   0.1); // Baseline optical depths
     mdspan_2d_mut dtaux(dtaux_data.data(), lu + 1, Photolysis::W_);
 
     std::vector<double> pomegax_data(M2_ * (lu + 1) * Photolysis::W_,
-                                     0.99); // Mock conservative scattering
+                                     0.99); // Standard conservative scattering
     RadiativeSolver::mdspan_3d_mut pomegax(pomegax_data.data(), M2_, lu + 1,
                                            Photolysis::W_);
 
