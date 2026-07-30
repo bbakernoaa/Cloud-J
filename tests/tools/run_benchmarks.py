@@ -75,21 +75,36 @@ def run_benchmarks(iterations):
     t_cpp_gpu = execute_binary_repeatedly(cpp_bin, iterations, use_headers_flag=True)
     if t_cpp_gpu is None: return False
 
+    # 4. Compile C++ binary in PCR mode and benchmark
+    print("\nRe-compiling C++ Standalone with CLOUDJ_USE_PCR active for benchmark...")
+    try:
+        subprocess.run(["cmake", "-DCLOUDJ_GPU_MODE_BENCH=OFF", "-DCLOUDJ_USE_PCR=ON", ".."], cwd=build_dir, check=True, stdout=subprocess.PIPE)
+        subprocess.run(["make", "-j"], cwd=build_dir, check=True, stdout=subprocess.PIPE)
+    except subprocess.CalledProcessError as e:
+        print(f"Error: Re-compiling in PCR mode failed: {e}", file=sys.stderr)
+        return False
+        
+    print("Benchmarking C++ PCR Solver Mode...")
+    t_cpp_pcr = execute_binary_repeatedly(cpp_bin, iterations, use_headers_flag=True)
+    if t_cpp_pcr is None: return False
+
     # Restore default CPU Parity mode compilation to keep repo in default state
     print("\nRestoring default CPU Parity compilation mode...")
     try:
-        subprocess.run(["cmake", "-DCLOUDJ_GPU_MODE_BENCH=OFF", ".."], cwd=build_dir, check=True, stdout=subprocess.PIPE)
+        subprocess.run(["cmake", "-DCLOUDJ_GPU_MODE_BENCH=OFF", "-DCLOUDJ_USE_PCR=OFF", ".."], cwd=build_dir, check=True, stdout=subprocess.PIPE)
         subprocess.run(["make", "-j"], cwd=build_dir, check=True, stdout=subprocess.PIPE)
     except subprocess.CalledProcessError as e:
          print(f"Warning: Failed to restore default compilation: {e}", file=sys.stderr)
 
-    # 4. Compute and Print Metrics
+    # 5. Compute and Print Metrics
     rate_fortran = iterations / t_fortran
     rate_cpu = iterations / t_cpp_cpu
     rate_gpu = iterations / t_cpp_gpu
+    rate_pcr = iterations / t_cpp_pcr
     
     speedup_cpu = t_fortran / t_cpp_cpu
     speedup_gpu = t_fortran / t_cpp_gpu
+    speedup_pcr = t_fortran / t_cpp_pcr
     speedup_gpu_vs_cpu = t_cpp_cpu / t_cpp_gpu
 
     print("\n=================================================================")
@@ -102,6 +117,7 @@ def run_benchmarks(iterations):
     print(f" | Fortran (gfortran)   | {t_fortran:11.4f}s | {rate_fortran:12.1f} columns/s | [Reference]        |")
     print(f" | C++ (CPU Parity)     | {t_cpp_cpu:11.4f}s | {rate_cpu:12.1f} columns/s | {speedup_cpu:17.2f}x |")
     print(f" | C++ (GPU-Hermite)    | {t_cpp_gpu:11.4f}s | {rate_gpu:12.1f} columns/s | {speedup_gpu:17.2f}x |")
+    print(f" | C++ (PCR Solver)     | {t_cpp_pcr:11.4f}s | {rate_pcr:12.1f} columns/s | {speedup_pcr:17.2f}x |")
     print("=================================================================")
     print(f"Optimization Speedup (GPU-Hermite vs C++ CPU): {speedup_gpu_vs_cpu:.2f}x branchless performance increase\n")
     return True
