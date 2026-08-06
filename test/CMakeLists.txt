@@ -61,6 +61,49 @@ if(CLOUDJ_CPP_PORT)
   set_target_properties(test_fortran_math PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
   )
+
+  add_executable(test_osa ${CMAKE_CURRENT_SOURCE_DIR}/../tests/cpp/test_osa.cpp)
+  set_target_properties(test_osa PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+  add_test(NAME TestOSA COMMAND test_osa)
+
+  add_executable(test_safe_div ${CMAKE_CURRENT_SOURCE_DIR}/../tests/cpp/test_safe_div.cpp)
+  set_target_properties(test_safe_div PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+  add_test(NAME TestSafeDiv COMMAND test_safe_div)
+
+  add_executable(test_init ${CMAKE_CURRENT_SOURCE_DIR}/../tests/cpp/test_init.cpp)
+  target_compile_definitions(test_init PRIVATE MODEL_STANDALONE)
+  set_target_properties(test_init PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+  add_test(NAME TestInit COMMAND test_init)
+
+  add_executable(test_extral1 ${CMAKE_CURRENT_SOURCE_DIR}/../tests/cpp/test_extral1.cpp)
+  target_compile_definitions(test_extral1 PRIVATE MODEL_STANDALONE)
+  set_target_properties(test_extral1 PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+  add_test(NAME TestExtral1 COMMAND test_extral1)
+
+  add_executable(test_sphere ${CMAKE_CURRENT_SOURCE_DIR}/../tests/cpp/test_sphere.cpp)
+  target_compile_definitions(test_sphere PRIVATE MODEL_STANDALONE)
+  set_target_properties(test_sphere PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+  add_test(NAME TestSphere COMMAND test_sphere)
+
+  add_executable(test_optics ${CMAKE_CURRENT_SOURCE_DIR}/../tests/cpp/test_optics.cpp)
+  target_compile_definitions(test_optics PRIVATE MODEL_STANDALONE)
+  set_target_properties(test_optics PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+  add_test(NAME TestOptics COMMAND test_optics)
+
+  add_executable(test_photo_jx ${CMAKE_CURRENT_SOURCE_DIR}/../tests/cpp/test_photo_jx.cpp)
+  target_compile_definitions(test_photo_jx PRIVATE MODEL_STANDALONE)
+  set_target_properties(test_photo_jx PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+  add_test(NAME TestPhotoJX COMMAND test_photo_jx)
+
+  add_executable(test_heapsort ${CMAKE_CURRENT_SOURCE_DIR}/../tests/cpp/test_heapsort.cpp)
+  target_compile_definitions(test_heapsort PRIVATE MODEL_STANDALONE)
+  set_target_properties(test_heapsort PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+  add_test(NAME TestHeapsort COMMAND test_heapsort)
+
+  add_executable(test_cloud_jx ${CMAKE_CURRENT_SOURCE_DIR}/../tests/cpp/test_cloud_jx.cpp)
+  target_compile_definitions(test_cloud_jx PRIVATE MODEL_STANDALONE)
+  set_target_properties(test_cloud_jx PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+  add_test(NAME TestCloudJX COMMAND test_cloud_jx)
 endif()
 
 

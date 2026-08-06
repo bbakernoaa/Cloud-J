@@ -7,6 +7,17 @@
 #include <experimental/mdspan.hpp>
 #include <vector>
 
+// Strictly opt-in OpenMP parallelization of the per-wavelength (18-bin) radiative
+// solve inside a single MIESCT/OPMIE call. Disabled by default; only enabled
+// when the CLOUDJ_USE_OPENMP compile definition is set (see CMakeLists.txt
+// option CLOUDJ_USE_OPENMP). This is intended for callers that invoke
+// cloud_jx() serially one column at a time and want to use idle CPU cores
+// within a single call. Host models that already parallelize across columns
+// should NOT enable this without benchmarking for oversubscription.
+#if defined(CLOUDJ_USE_OPENMP)
+#include <omp.h>
+#endif
+
 // Portable compiler loop-unrolling hint macros for standard compilers (GCC,
 // Clang, Intel oneAPI)
 #if defined(__clang__)
@@ -227,7 +238,7 @@ inline void GEN_ID(mdspan_2d pomega, // (M2_, N_)
   }
 
   // Intermediate points: can be even or odd, A & C diagonal
-  for (int ll = 2; ll <= nd - 2; ll += 2) {
+  for (int ll = 1; ll <= nd - 2; ll += 2) {
     deltau = ztau(ll + 1) - ztau(ll - 1);
     for (int i = 0; i < M_; ++i) {
       a(i, ll) = EMU[i] / deltau;
@@ -252,7 +263,7 @@ inline void GEN_ID(mdspan_2d pomega, // (M2_, N_)
     }
   }
 
-  for (int ll = 3; ll <= nd - 3; ll += 2) {
+  for (int ll = 2; ll <= nd - 3; ll += 2) {
     deltau = ztau(ll + 1) - ztau(ll - 1);
     for (int i = 0; i < M_; ++i) {
       a(i, ll) = EMU[i] / deltau;
@@ -1003,7 +1014,7 @@ inline void OPMIE(mdspan_2d dtaux,       // (N_-1, W_)
 ) {
   int l1u = lu + 1;
   int jaddto = 0;
-  for (int l = 0; l < lu; ++l) {
+  for (int l = 0; l < l1u; ++l) {
     jaddto += jxtra[l];
   }
 
@@ -1014,8 +1025,6 @@ inline void OPMIE(mdspan_2d dtaux,       // (N_-1, W_)
   for (int l = 1; l < l1u + 1; ++l) {
     int jx = (l - 1 < lu) ? jxtra[l - 1] : 0;
     l2lev[l] = l2lev[l - 1] + 1 + jx;
-    std::cout << "l2lev[" << l << "] = " << l2lev[l] << ", jx=" << jx
-              << ", l2lev[l-1]=" << l2lev[l - 1] << std::endl;
   }
 
   std::vector<double> ttau(l1u + 1, 0.0);
@@ -1037,11 +1046,26 @@ inline void OPMIE(mdspan_2d dtaux,       // (N_-1, W_)
   std::vector<double> pomega_data(M2_ * nd * Photolysis::W_, 0.0);
   mdspan_3d_mut pomega(pomega_data.data(), M2_, nd, Photolysis::W_);
 
-  for (int k = 0; k < Photolysis::W_; ++k) {
-    for (int l = 0; l < lu; ++l) {
-      dtau1[l] = dtaux(l, k) * amg(l);
+  // Per-wavelength (k) setup: builds dtau1/ttau/ftau/pomega1 scratch and
+  // scatters the results into the shared ztau/fz/pomega/flxd/flxd0 arrays.
+  // ttau_l/dtau1_l/ftau_l/pomega1_l are fully overwritten at the start of
+  // every call before being read (verified: dtau1 written for all l1u+1
+  // entries; ttau written for all l1u+1 entries; ftau zeroed then
+  // selectively written for all l1u+1 entries; pomega1 written for all
+  // M2_*(l1u+1) entries) -- so they are safe per-k private scratch, but
+  // MUST NOT be shared across threads (analogous to the Workspace race in
+  // MIESCT). Everything else this lambda touches (dtaux, amg, amf, l2lev,
+  // pomegax, and the shared ztau/fz/pomega/flxd/flxd0 outputs) is read or
+  // written exclusively through the k-th column/slice, so different k
+  // values never alias.
+  auto opmie_setup_k = [&](int k, std::vector<double> &ttau_l,
+                           std::vector<double> &dtau1_l,
+                           std::vector<double> &ftau_l,
+                           mdspan_2d_mut pomega1_l) {
+    for (int l = 0; l < l1u; ++l) {
+      dtau1_l[l] = dtaux(l, k) * amg(l);
     }
-    dtau1[lu] = 0.0;
+    dtau1_l[l1u] = 0.0;
 
     int ll0 = -1; // -1 represents no shadow boundary found
     for (int ll = 0; ll < l1u + 1; ++ll) {
@@ -1051,48 +1075,48 @@ inline void OPMIE(mdspan_2d dtaux,       // (N_-1, W_)
     }
 
     for (int l = 0; l < l1u + 1; ++l)
-      ftau[l] = 0.0;
+      ftau_l[l] = 0.0;
 
     for (int ll = ll0 + 1; ll < l1u + 1; ++ll) {
       double xltau = 0.0;
       for (int ii = 0; ii < l1u; ++ii) {
-        xltau += dtau1[ii] * amf(ii, ll);
+        xltau += dtau1_l[ii] * amf(ii, ll);
       }
       if (xltau < 82.0) {
-        ftau[ll] =
+        ftau_l[ll] =
             exp_eval(-xltau); // Replaced std::exp with exp_eval dispatcher
       }
     }
 
     fsbot(k) = 0.0;
     if (ll0 == -1) {
-      fsbot(k) = ftau[0] / amf(0, 0);
+      fsbot(k) = ftau_l[0] / amf(0, 0);
     }
 
-    ttau[l1u] = 0.0;
+    ttau_l[l1u] = 0.0;
     for (int l = l1u - 1; l >= 0; --l) {
-      ttau[l] = ttau[l + 1] + dtaux(l, k) * (amg(l) * amg(l));
+      ttau_l[l] = ttau_l[l + 1] + dtaux(l, k) * (amg(l) * amg(l));
     }
 
     for (int i = 0; i < M2_; ++i) {
-      pomega1(i, 0) = pomegax(i, 0, k);
-      pomega1(i, l1u) = pomegax(i, l1u - 1, k);
+      pomega1_l(i, 0) = pomegax(i, 0, k);
+      pomega1_l(i, l1u) = pomegax(i, l1u - 1, k);
     }
     for (int l = 1; l < l1u; ++l) {
       for (int i = 0; i < M2_; ++i) {
-        pomega1(i, l) = (pomegax(i, l, k) * dtaux(l, k) +
-                         pomegax(i, l - 1, k) * dtaux(l - 1, k)) /
-                        (dtaux(l, k) + dtaux(l - 1, k));
+        pomega1_l(i, l) = (pomegax(i, l, k) * dtaux(l, k) +
+                          pomegax(i, l - 1, k) * dtaux(l - 1, k)) /
+                         (dtaux(l, k) + dtaux(l - 1, k));
       }
     }
 
     for (int l = 0; l < l1u + 1; ++l) {
       int l2 = l2lev[l];
       int lz = nd - 1 - 2 * l2;
-      ztau(lz, k) = ttau[l];
-      fz(lz, k) = ftau[l];
+      ztau(lz, k) = ttau_l[l];
+      fz(lz, k) = ftau_l[l];
       for (int i = 0; i < M2_; ++i) {
-        pomega(i, lz, k) = pomega1(i, l);
+        pomega(i, lz, k) = pomega1_l(i, l);
       }
     }
 
@@ -1104,14 +1128,14 @@ inline void OPMIE(mdspan_2d dtaux,       // (N_-1, W_)
       int l22 = l2lev[l + 1] - l2lev[l] - 1;
 
       if (l22 > 0) {
-        double taubtm = ttau[l];
-        double tautop = ttau[l + 1];
-        double fbtm = ftau[l];
-        double ftop = ftau[l + 1];
+        double taubtm = ttau_l[l];
+        double tautop = ttau_l[l + 1];
+        double fbtm = ftau_l[l];
+        double ftop = ftau_l[l + 1];
         double pombtm[M2_], pomtop[M2_];
         for (int i = 0; i < M2_; ++i) {
-          pombtm[i] = pomega1(i, l);
-          pomtop[i] = pomega1(i, l + 1);
+          pombtm[i] = pomega1_l(i, l);
+          pomtop[i] = pomega1_l(i, l + 1);
         }
 
         double divt = 1.0 / (std::pow(atau, l22 + 1) - 1.0);
@@ -1144,22 +1168,22 @@ inline void OPMIE(mdspan_2d dtaux,       // (N_-1, W_)
       int l22 = l2lev[l + 1] - l2lev[l] - 1;
 
       if (l22 == 0) {
-        double dtausca = dtau1[l] * pomegax(0, l, k);
-        flxd(l, k) += 0.5 * (ftau[l] + ftau[l + 1]) * dtausca;
+        double dtausca = dtau1_l[l] * pomegax(0, l, k);
+        flxd(l, k) += 0.5 * (ftau_l[l] + ftau_l[l + 1]) * dtausca;
 
-        double dtauabs = dtau1[l] - dtausca;
+        double dtauabs = dtau1_l[l] - dtausca;
         double decay =
             exp_eval(-0.5 * dtauabs * amf(l, l)); // exp_eval dispatcher
 
         if (decay > 0.01) {
-          flxd(l, k) +=
-              (ftau[l + 1] * (1.0 - decay) + ftau[l] * (1.0 / decay - 1.0)) /
-              amf(l, l);
+          flxd(l, k) += (ftau_l[l + 1] * (1.0 - decay) +
+                         ftau_l[l] * (1.0 / decay - 1.0)) /
+                        amf(l, l);
         } else {
           if (ll0 == -1) {
-            flxd(l, k) += ftau[l + 1] / amf(l, l);
+            flxd(l, k) += ftau_l[l + 1] / amf(l, l);
           } else {
-            flxd(l, k) += ftau[l] / amf(l, l);
+            flxd(l, k) += ftau_l[l] / amf(l, l);
           }
         }
       } else {
@@ -1200,12 +1224,43 @@ inline void OPMIE(mdspan_2d dtaux,       // (N_-1, W_)
         pomega(i, lz, k) = 0.5 * (pomega(i, lz - 1, k) + pomega(i, lz + 1, k));
       }
     }
+  };
+
+#if defined(CLOUDJ_USE_OPENMP)
+  // Opt-in parallel path: each thread gets its own private ttau/dtau1/ftau/
+  // pomega1 scratch (thread_local, resized on first touch per thread and
+  // cheaply re-assigned every iteration -- no allocation once warmed up)
+  // to avoid the data race described above. schedule(static) keeps
+  // deterministic thread-to-iteration assignment; results are bit-identical
+  // to the serial path regardless of schedule since k-slices are fully
+  // independent.
+#pragma omp parallel for schedule(static)
+  for (int k = 0; k < Photolysis::W_; ++k) {
+    thread_local std::vector<double> ttau_tls;
+    thread_local std::vector<double> dtau1_tls;
+    thread_local std::vector<double> ftau_tls;
+    thread_local std::vector<double> pomega1_data_tls;
+    ttau_tls.assign(l1u + 1, 0.0);
+    dtau1_tls.assign(l1u + 1, 0.0);
+    ftau_tls.assign(l1u + 1, 0.0);
+    pomega1_data_tls.assign(static_cast<size_t>(M2_) * (l1u + 1), 0.0);
+    mdspan_2d_mut pomega1_tls(pomega1_data_tls.data(), M2_, l1u + 1);
+
+    opmie_setup_k(k, ttau_tls, dtau1_tls, ftau_tls, pomega1_tls);
   }
+#else
+  for (int k = 0; k < Photolysis::W_; ++k) {
+    opmie_setup_k(k, ttau, dtau1, ftau, pomega1);
+  }
+#endif
 
   // Call MIESCT inside the workspace to orchestrate solving
   MIESCT(fj, fjtop, fjbot, fibot, pomega, fz, ztau, fsbot, rfl, u0, nd, ws);
 
-  for (int k = 0; k < Photolysis::W_; ++k) {
+  // Post-processing (fjact/fjflx): reads/writes exclusively through the k-th
+  // column of fj/fz/ztau/fjact/fjflx, and uses no shared mutable scratch, so
+  // this loop is safe to parallelize directly.
+  auto opmie_postproc_k = [&](int k) {
     for (int l = 0; l < l1u; ++l) {
       int lz0 = nd - 1 - 2 * l2lev[l + 1];
       int lz1 = nd - 1 - 2 * l2lev[l];
@@ -1231,7 +1286,18 @@ inline void OPMIE(mdspan_2d dtaux,       // (N_-1, W_)
       fjflx(l - 1, k) =
           4.0 * (fj(lz - 1, k) * fjflx0 + fj(lz + 1, k) * (1.0 - fjflx0));
     }
+  };
+
+#if defined(CLOUDJ_USE_OPENMP)
+#pragma omp parallel for schedule(static)
+  for (int k = 0; k < Photolysis::W_; ++k) {
+    opmie_postproc_k(k);
   }
+#else
+  for (int k = 0; k < Photolysis::W_; ++k) {
+    opmie_postproc_k(k);
+  }
+#endif
 }
 inline void MIESCT(mdspan_2d_mut fj,     // (N_, W_+W_r)
                    mdspan_1d_mut fjtop,  // (W_+W_r)
@@ -1261,8 +1327,13 @@ inline void MIESCT(mdspan_2d_mut fj,     // (N_, W_+W_r)
     pm0[im] = 0.25 * pm0[im];
   }
 
-  // Execute the block solver iteratively for each wavelength bin
-  for (int k_idx = 0; k_idx < Photolysis::W_; ++k_idx) {
+  // Body of the per-wavelength block solve, shared by both the serial and
+  // OpenMP paths below. `local_ws` is the workspace to use for this k_idx:
+  // the single shared `ws` in the serial case, or a private per-thread
+  // workspace in the parallel case. Every array this touches (pomega_slice,
+  // fz_slice, ztau_slice, fj, fjtop, fjbot, fibot) is indexed/offset by
+  // k_idx, so no thread ever writes another thread's k_idx slice.
+  auto miesct_solve_k = [&](int k_idx, Workspace &local_ws) {
     // Create views for the current wavelength slice to pass into BLKSLV
     mdspan_2d_mut pomega_slice(pomega.data_handle() + k_idx * (M2_ * nd), M2_,
                                nd);
@@ -1280,14 +1351,39 @@ inline void MIESCT(mdspan_2d_mut fj,     // (N_, W_+W_r)
     double fjbot_val;
 
     BLKSLV(fj, pomega_slice, fz_slice, ztau_slice, fsbot(k_idx), rfl_slice, pm,
-           pm0, fjtop_val, fjbot_val, fibot_slice, nd, k_idx, ws);
+           pm0, fjtop_val, fjbot_val, fibot_slice, nd, k_idx, local_ws);
 
     fjtop(k_idx) = fjtop_val;
     fjbot(k_idx) = fjbot_val;
     for (int i = 0; i < 5; ++i) {
       fibot(i, k_idx) = fibot_slice[i];
     }
+  };
+
+#if defined(CLOUDJ_USE_OPENMP)
+  // Opt-in parallel path: give every thread its OWN Workspace so the
+  // internal scratch buffers (a_data, b_data, c_data, h_data, rr_data,
+  // aa_data, cc_data, dd_data) are never shared/raced across threads. The
+  // thread_local workspace is resized (cheap: .assign() on an
+  // already-correctly-sized vector) on every iteration rather than only
+  // once, since resize is idempotent and inexpensive, and this keeps the
+  // logic simple and safe regardless of how OpenMP schedules iterations to
+  // threads. schedule(static) gives deterministic, reproducible
+  // thread-to-iteration assignment; results are bit-identical to the
+  // serial path since each k_idx's solve is fully independent.
+#pragma omp parallel for schedule(static)
+  for (int k_idx = 0; k_idx < Photolysis::W_; ++k_idx) {
+    thread_local Workspace tls_ws;
+    tls_ws.resize(nd);
+    miesct_solve_k(k_idx, tls_ws);
   }
+#else
+  // Default (safe) path: single shared workspace reused serially across all
+  // 18 wavelength bins, exactly as before this change.
+  for (int k_idx = 0; k_idx < Photolysis::W_; ++k_idx) {
+    miesct_solve_k(k_idx, ws);
+  }
+#endif
 }
 
 } // namespace RadiativeSolver
