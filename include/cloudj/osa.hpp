@@ -9,6 +9,7 @@
 
 #include <cmath>
 #include <algorithm>
+#include <cloudj/fast_math.hpp>
 
 namespace CloudJ {
 namespace OSA {
@@ -548,7 +549,7 @@ inline void FJX_OSA(double WAVEL, double WIND, double CHLORa,
     ZCHL = std::max(0.01, std::min(2.0, ZCHL));
     double ZWL     = XAKWL[jwl];
     double ZCHLABS = XAKACHL[jwl];
-    double ZYLMD   = std::exp(0.014 * (440.0 - ZWL));
+    double ZYLMD   = RadiativeSolver::exp_eval(0.014 * (440.0 - ZWL));
 
     double ZWORK4 = std::pow(ZCHL, 0.65);
     double ZWORK5 = std::log10(ZCHL);
@@ -576,8 +577,9 @@ inline void FJX_OSA(double WAVEL, double WIND, double CHLORa,
         double ZR11 = ZRR0 - (0.0152 - 1.7873 * ZCOS + 6.8972 * ZCOS * ZCOS
                               - 8.5778 * ZCOS * ZCOS * ZCOS
                               + 4.071 * ZSIG - 7.6446 * ZCOS * ZSIG)
-                      * std::exp(0.1643 - 7.8409 * ZCOS - 3.5639 * ZCOS * ZCOS
-                                - 2.3588 * ZSIG + 10.0538 * ZCOS * ZSIG)
+                      * RadiativeSolver::exp_eval(
+                            0.1643 - 7.8409 * ZCOS - 3.5639 * ZCOS * ZCOS -
+                            2.3588 * ZSIG + 10.0538 * ZCOS * ZSIG)
                       * ZRR0 / ZRRR;
 
         // Compute direct water-leaving albedo (ZRW)

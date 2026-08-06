@@ -4,6 +4,7 @@
 #include <cloudj/state.hpp>
 #include <cloudj/error.hpp>
 #include <cloudj/cross_sections.hpp>
+#include <cloudj/fast_math.hpp>
 #include <cloudj/radiative_solver.hpp>
 #include <cloudj/photolysis.hpp>
 #include <algorithm>
@@ -256,7 +257,7 @@ inline void SPHERE1R(double U0, double RAD,
     for (int L = 0; L < LTOP; ++L) {
         DIVZ[L] = 1.0 / (RZ[L + 1] - RZ[L]);
         RATZ[L] = RZ[L] / RZ[L + 1];
-        RD[L] = std::exp(-(RZ[L] - RAD) / DDHT);
+        RD[L] = RadiativeSolver::exp_eval(-(RZ[L] - RAD) / DDHT);
         RN[L] = 1.0 + REF0 * RD[L];
     }
     RD[LTOP] = 0.0;
@@ -928,12 +929,12 @@ inline void ACLIM_GEO(const double* PPP, const double* TTT, const double* QQQ,
         if (TTT[L] > 273.15) {
             // Tetens formula for liquid water
             double T = TTT[L] - 273.15;
-            es = 6.112 * std::exp(17.67 * T / (T + 243.50));
+            es = 6.112 * RadiativeSolver::exp_eval(17.67 * T / (T + 243.50));
         } else {
             // Ice saturation formula (Buck/Magnus form over ice)
             double T = TTT[L];  // in Kelvin
             double log_es = 23.33086 - 6111.72784 / T + 0.15215 * std::log(T);
-            es = std::exp(log_es);
+            es = RadiativeSolver::exp_eval(log_es);
         }
         double qs = (eps * es) / (PPP[L] - es * (1.0 - eps));
         RH[L] = std::min(std::max(QQQ[L] / qs, 0.0), 1.0);
