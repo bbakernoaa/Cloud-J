@@ -44,11 +44,6 @@ if(CLOUDJ_CPP_PORT)
         add_definitions(-DCLOUDJ_USE_PCR)
     endif()
 
-    option(CLOUDJ_USE_FAST_EXP "Enable high-speed branchless fast_exp approximation in OPMIE" OFF)
-    if(CLOUDJ_USE_FAST_EXP)
-        add_definitions(-DCLOUDJ_USE_FAST_EXP)
-    endif()
-
     option(CLOUDJ_USE_OPENMP "Enable OpenMP parallelization of the per-wavelength radiative solve inside a single cloud_jx() call (opt-in; do not combine with column-level parallelism in the host model without benchmarking oversubscription)" OFF)
     if(CLOUDJ_USE_OPENMP)
         find_package(OpenMP REQUIRED COMPONENTS CXX)
