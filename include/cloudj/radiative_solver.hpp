@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cloudj/fast_math.hpp>
 #include <cmath>
 #include <experimental/mdspan.hpp>
 #include <vector>
@@ -532,14 +533,28 @@ inline void solve_pcr(mdspan_2d_mut fj, mdspan_2d pomega, mdspan_1d fz,
   for (int l = 0; l < nd; ++l) {
     CLOUDJ_UNROLL_4
     for (int i = 0; i < M_; ++i) {
-      D_v(i, l) = c(i, l);
+      D_v(i, l) = h(i, l);
       // a is diagonal of size 4 representing lower diagonal
       A_v(i, i, l) = a(i, l);
       CLOUDJ_UNROLL_4
       for (int j = 0; j < M_; ++j) {
         B_v(i, j, l) = b(i, j, l);
-        C_v(i, j, l) = cc(i, j, l);
       }
+    }
+  }
+
+  // Upper block C: level 0 uses full cc matrix, levels 1..nd-2 use diagonal c
+  CLOUDJ_UNROLL_4
+  for (int i = 0; i < M_; ++i) {
+    CLOUDJ_UNROLL_4
+    for (int j = 0; j < M_; ++j) {
+      C_v(i, j, 0) = cc(i, j, 0);
+    }
+  }
+  for (int l = 1; l < nd; ++l) {
+    CLOUDJ_UNROLL_4
+    for (int i = 0; i < M_; ++i) {
+      C_v(i, i, l) = c(i, l);
     }
   }
 
@@ -775,22 +790,42 @@ inline void solve_pcr(mdspan_2d_mut fj, mdspan_2d pomega, mdspan_1d fz,
     }
   }
 
-  // Extract boundary fluxes and populate output J-values
-  fjtop = 0.0;
-  fjbot = 0.0;
-  CLOUDJ_UNROLL_4
-  for (int i = 0; i < M_; ++i) {
-    fjtop += rr(i, 0) * WT[i];
-    fjbot += rr(i, l_last) * WT[i];
+  // MEAN J & H (matching BLKSLV extraction exactly)
+  for (int l = 0; l < nd; l += 2) {
+    fj(l, k_idx) = rr(0, l) * WT[0] + rr(1, l) * WT[1] + rr(2, l) * WT[2] +
+                   rr(3, l) * WT[3];
+  }
+  for (int l = 1; l < nd; l += 2) {
+    fj(l, k_idx) = rr(0, l) * WT[0] * EMU[0] + rr(1, l) * WT[1] * EMU[1] +
+                   rr(2, l) * WT[2] * EMU[2] + rr(3, l) * WT[3] * EMU[3];
   }
 
-  for (int l = 0; l < nd; ++l) {
-    double sum_rr = 0.0;
-    CLOUDJ_UNROLL_4
-    for (int i = 0; i < M_; ++i) {
-      sum_rr += rr(i, l) * WT[i];
-    }
-    fj(l, k_idx) = sum_rr;
+  // FJTOP diffuse flux out of top-of-atmosphere
+  double sumt = rr(0, 0) * WT[0] * EMU[0] + rr(1, 0) * WT[1] * EMU[1] +
+                rr(2, 0) * WT[2] * EMU[2] + rr(3, 0) * WT[3] * EMU[3];
+  fjtop = 4.0 * sumt;
+
+  // Surface diffuse flux integration
+  double sumb = rr(0, l_last) * WT[0] * EMU[0] +
+                rr(1, l_last) * WT[1] * EMU[1] +
+                rr(2, l_last) * WT[2] * EMU[2] + rr(3, l_last) * WT[3] * EMU[3];
+
+  double sumbr = rr(0, l_last) * WT[0] * EMU[0] * rfl[0] +
+                 rr(1, l_last) * WT[1] * EMU[1] * rfl[1] +
+                 rr(2, l_last) * WT[2] * EMU[2] * rfl[2] +
+                 rr(3, l_last) * WT[3] * EMU[3] * rfl[3];
+
+  double sumrf = WT[0] * EMU[0] * rfl[0] + WT[1] * EMU[1] * rfl[1] +
+                 WT[2] * EMU[2] * rfl[2] + WT[3] * EMU[3] * rfl[3];
+
+  double sumbx = (4.0 * sumbr + fsbot * rfl[4]) / (1.0 + 2.0 * sumrf);
+
+  fjbot = 4.0 * sumb - sumbx;
+
+  // FIBOT outputs: diffuse rays up/down
+  fibot[4] = sumbx;
+  for (int j = 0; j < 4; ++j) {
+    fibot[j] = 2.0 * rr(j, l_last) - sumbx;
   }
 }
 #endif
@@ -952,28 +987,6 @@ inline void BLKSLV(mdspan_2d_mut fj, // (N_, W_+W_r)
   for (int j = 0; j < 4; ++j) {
     fibot[j] = 2.0 * rr(j, l_last) - sumbx;
   }
-}
-
-// High-speed branchless approximation of exp(x) using Horner's Method FMA chain
-inline double fast_exp(double x) {
-  // Exact Remez/Minimax coefficients optimized for x in [-10, 0]
-  // Computes: c0 + x*(c1 + x*(c2 + x*(c3 + x*c4)))
-  constexpr double c0 = 1.0;
-  constexpr double c1 = 1.0;
-  constexpr double c2 = 0.4999999;
-  constexpr double c3 = 0.1666667;
-  constexpr double c4 = 0.0416667;
-
-  return c0 + x * (c1 + x * (c2 + x * (c3 + x * c4)));
-}
-
-// Inline dispatcher to select between standard std::exp and optimized fast_exp
-inline double exp_eval(double x) {
-#if defined(CLOUDJ_USE_FAST_EXP)
-  return fast_exp(x);
-#else
-  return std::exp(x);
-#endif
 }
 
 // Forward declaration of MIESCT
