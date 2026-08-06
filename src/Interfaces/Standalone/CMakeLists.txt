@@ -29,7 +29,7 @@ if(CLOUDJ_CPP_PORT)
 
         option(CLOUDJ_GPU_MODE_BENCH "Compile C++ standalone in GPU Hermite spline mode" OFF)
         if(CLOUDJ_GPU_MODE_BENCH)
-                target_compile_definitions(cloudj_standalone_cpp PRIVATE CLOUDJ_GPU_MODE CLOUDJ_USE_FAST_EXP)
+                target_compile_definitions(cloudj_standalone_cpp PRIVATE CLOUDJ_GPU_MODE)
         endif()
 
         if(WIN32)
@@ -44,6 +44,11 @@ if(CLOUDJ_CPP_PORT)
 
         if(CLOUDJ_USE_OPENMP)
                 target_link_libraries(cloudj_standalone_cpp PUBLIC OpenMP::OpenMP_CXX)
+        endif()
+
+        option(CLOUDJ_CXX_MARCH_NATIVE "Enable -march=native for C++ targets (opt-in; not portable)" OFF)
+        if(CLOUDJ_CXX_MARCH_NATIVE)
+                target_compile_options(cloudj_standalone_cpp PRIVATE -march=native)
         endif()
 endif()
 
