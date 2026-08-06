@@ -43,6 +43,12 @@ if(CLOUDJ_CPP_PORT)
     if(CLOUDJ_USE_PCR)
         add_definitions(-DCLOUDJ_USE_PCR)
     endif()
+
+    option(CLOUDJ_USE_OPENMP "Enable OpenMP parallelization of the per-wavelength radiative solve inside a single cloud_jx() call (opt-in; do not combine with column-level parallelism in the host model without benchmarking oversubscription)" OFF)
+    if(CLOUDJ_USE_OPENMP)
+        find_package(OpenMP REQUIRED COMPONENTS CXX)
+        add_definitions(-DCLOUDJ_USE_OPENMP)
+    endif()
 endif()
 
 #-----------------------------------------------------------------------------
@@ -65,7 +71,7 @@ add_library(CloudJBuildProperties INTERFACE)
 #---------------------------------------------------------------------
 # Default compiler options
 #
-# CloudJ_Fortran_FLAGS_<COMPILER_ID> : common flags (all build types) 
+# CloudJ_Fortran_FLAGS_<COMPILER_ID> : common flags (all build types)
 # CloudJ_Fortran_FLAGS_<CONFIG>_<COMPILER_ID> : types-specific flags
 #
 # Valid COMPILER_ID: Intel and GNU
@@ -115,7 +121,7 @@ set(CloudJ_Fortran_FLAGS_RELWITHDEBINFO_GNU
    CACHE STRING "Cloud-J compiler flags for build type relwithdebinfo with GNU compilers"
 )
 set(CloudJ_Fortran_FLAGS_DEBUG_GNU
-   -g -gdwarf-2 -gstrict-dwarf -O0 -Wall -Wextra -Wconversion -Warray-temporaries 
+   -g -gdwarf-2 -gstrict-dwarf -O0 -Wall -Wextra -Wconversion -Warray-temporaries
    -fcheck=array-temps -ffpe-trap=invalid,zero,overflow -finit-real=snan -fcheck=bounds -fcheck=pointer
    CACHE STRING "Cloud-J compiler flags for build type debug with GNU compilers"
 )
@@ -320,7 +326,7 @@ if(CLOUDJ_EXTERNAL_CONFIG AND MAPL_ESMF)
         INTERFACE $<LINK_ONLY:MAPL.base>
 	INTERFACE $<LINK_ONLY:MAPL.generic>
     )
-    target_include_directories(CloudJBuildProperties 
+    target_include_directories(CloudJBuildProperties
         INTERFACE $<TARGET_PROPERTY:MAPL.base,INTERFACE_INCLUDE_DIRECTORIES>
 	INTERFACE $<TARGET_PROPERTY:MAPL.generic,INTERFACE_INCLUDE_DIRECTORIES>
     )

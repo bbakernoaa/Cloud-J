@@ -12,7 +12,7 @@ def execute_binary_repeatedly(binary_path, iterations, use_headers_flag=True):
     args = ["./" + os.path.basename(binary_path)]
     if use_headers_flag and "standalone_cpp" in binary_path:
         args.append("--use-headers-only")
-        
+
     start_time = time.perf_counter()
     for i in range(1, iterations + 1):
         res = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=os.path.dirname(binary_path))
@@ -33,7 +33,7 @@ def run_benchmarks(iterations):
 
     fortran_bin = "./cloudj_standalone"
     cpp_bin = "./cloudj_standalone_cpp"
-    
+
     # Locate paths dynamically
     if not os.path.exists(fortran_bin) or not os.path.exists(cpp_bin):
         for path in ["build/bin", "bin", "."]:
@@ -51,7 +51,7 @@ def run_benchmarks(iterations):
     print("Benchmarking Fortran Standalone...")
     t_fortran = execute_binary_repeatedly(fortran_bin, iterations, use_headers_flag=False)
     if t_fortran is None: return False
-    
+
     # 2. Benchmark standard C++ version
     print("Benchmarking C++ CPU Parity Mode...")
     t_cpp_cpu = execute_binary_repeatedly(cpp_bin, iterations, use_headers_flag=True)
@@ -63,14 +63,14 @@ def run_benchmarks(iterations):
     build_dir = os.path.dirname(os.path.dirname(fortran_bin))
     if not build_dir or build_dir == ".":
         build_dir = "build"
-        
+
     try:
         subprocess.run(["cmake", "-DCLOUDJ_GPU_MODE_BENCH=ON", ".."], cwd=build_dir, check=True, stdout=subprocess.PIPE)
         subprocess.run(["make", "-j"], cwd=build_dir, check=True, stdout=subprocess.PIPE)
     except subprocess.CalledProcessError as e:
         print(f"Error: Re-compiling in GPU mode failed: {e}", file=sys.stderr)
         return False
-        
+
     print("Benchmarking C++ GPU-Hermite Mode...")
     t_cpp_gpu = execute_binary_repeatedly(cpp_bin, iterations, use_headers_flag=True)
     if t_cpp_gpu is None: return False
@@ -83,7 +83,7 @@ def run_benchmarks(iterations):
     except subprocess.CalledProcessError as e:
         print(f"Error: Re-compiling in PCR mode failed: {e}", file=sys.stderr)
         return False
-        
+
     print("Benchmarking C++ PCR Solver Mode...")
     t_cpp_pcr = execute_binary_repeatedly(cpp_bin, iterations, use_headers_flag=True)
     if t_cpp_pcr is None: return False
@@ -101,7 +101,7 @@ def run_benchmarks(iterations):
     rate_cpu = iterations / t_cpp_cpu
     rate_gpu = iterations / t_cpp_gpu
     rate_pcr = iterations / t_cpp_pcr
-    
+
     speedup_cpu = t_fortran / t_cpp_cpu
     speedup_gpu = t_fortran / t_cpp_gpu
     speedup_pcr = t_fortran / t_cpp_pcr
@@ -126,6 +126,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--count", type=int, default=500)
     args = parser.parse_args()
-    
+
     success = run_benchmarks(args.count)
     sys.exit(0 if success else 1)
