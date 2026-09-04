@@ -1141,6 +1141,55 @@ inline void JP_ATM(const double* PPJ, const double* TTJ, const double* DDJ,
 }
 
 // =========================================================================
+// PHOTO_JX scratch workspace — persistent, reused across calls
+// =========================================================================
+/// Holds all per-call scratch buffers PHOTO_JX previously heap-allocated
+/// on every invocation. A single thread_local instance is reused across
+/// calls so std::vector::resize() becomes a no-op in steady state (no
+/// per-call allocation). thread_local (NOT static) is mandatory: with
+/// CLOUDJ_USE_OPENMP the wavelength loop runs concurrently and CLOUD_JX
+/// may call PHOTO_JX up to 4x per column — each thread must own its own
+/// scratch, never share it.
+///
+/// Sizes are IDENTICAL to the previous local declarations. Buffers are
+/// resized at the top of PHOTO_JX; resize() only reallocates when the
+/// requested size differs from the current size.
+struct PhotoJXWorkspace {
+    // Column arrays (fully overwritten each call → no re-zero needed)
+    std::vector<double> PPJ, ZZJ, TTJ, HHJ, DDJ, RRJ, OOJ, CCJ;
+    // AMG: initialized to 1.0 then conditionally overwritten → must be
+    // re-filled with 1.0 each call.
+    std::vector<double> AMG;
+    // AMF: zeroed internally by the SPHERE* routines → no external zero.
+    std::vector<double> AMF_data;
+    // Optical-depth accumulators (+=) → must be zeroed each call.
+    std::vector<double> OD_arr, SSA_arr, SLEG_arr, OD600, FFXTAU;
+    // DTAUX/POMEGAX: fully overwritten in the K/L transform loop before the
+    // radiative solve, BUT only the S_ (=WW) active bins are written while
+    // the buffer is sized L1U*WW; the remaining bins were 0 from the fresh
+    // allocation. Zero to preserve that.
+    std::vector<double> DTAUX_data, POMEGAX_data;
+    std::vector<int> JXTRA; // fully written by EXTRAL1
+    // OPMIE output buffers. flxd/flxd0 are accumulated (+=) inside OPMIE;
+    // the rest are direct-assigned but zeroed here for safety.
+    std::vector<double> AVGF_data, FJTOP_data, FJBOT_data, FIBOT_data,
+        FSBOT_data, FJFLX_data, FLXD_data, FLXD0_data;
+    std::vector<double> FFF_data; // fully overwritten for active bins; zeroed
+    // Heating-rate accumulators (+=) → must be zeroed each call.
+    std::vector<double> FFX, FFXNET;
+    std::vector<double> FLXJ; // fully overwritten before read each K
+    // JRATET flat output buffer (reused; JRATET zeroes what it needs)
+    std::vector<double> VALJL_flat;
+    // Persistent radiative-solver workspace (its internal buffers persist;
+    // ws.resize(nd) is a cheap no-op when nd is unchanged).
+    RadiativeSolver::Workspace ws;
+    // SpecData rebuilt from CloudJState; state is const/unchanging so we
+    // only rebuild when NJX changes (spec_njx == -1 means "not built yet").
+    Photolysis::SpecData spec;
+    int spec_njx = -1;
+};
+
+// =========================================================================
 // PHOTO_JX — Main Column Photolysis Physics Driver
 // =========================================================================
 /// Gateway to single column fast-JX calculations.
@@ -1219,10 +1268,58 @@ inline void PHOTO_JX(
         return;
     }
 
+    // --- Persistent per-thread scratch workspace (allocation-free steady
+    //     state). thread_local, never shared across concurrent threads. ---
+    thread_local PhotoJXWorkspace wsx;
+
+    // Resize all scratch buffers to the sizes this call needs. resize() is a
+    // no-op (no allocation) when the size is unchanged. Sizes below are
+    // IDENTICAL to the previous per-call local declarations.
+    const int WW_ = W_ + W_r;              // = WW below
+    const int AMF_dim_ = L1U + 1;
+    wsx.PPJ.resize(L1U + 1);
+    wsx.ZZJ.resize(L1U + 1);
+    wsx.TTJ.resize(L1U);
+    wsx.HHJ.resize(L1U);
+    wsx.DDJ.resize(L1U);
+    wsx.RRJ.resize(L1U);
+    wsx.OOJ.resize(L1U);
+    wsx.CCJ.resize(L1U);
+    wsx.AMG.resize(L1U);
+    wsx.AMF_data.resize(AMF_dim_ * AMF_dim_);
+    wsx.OD_arr.resize(S_ * L1U);
+    wsx.SSA_arr.resize(S_ * L1U);
+    wsx.SLEG_arr.resize(8 * S_ * L1U);
+    wsx.OD600.resize(L1U);
+    wsx.FFXTAU.resize(S_ * 4);
+    wsx.DTAUX_data.resize(L1U * WW_);
+    wsx.POMEGAX_data.resize(8 * L1U * WW_);
+    wsx.JXTRA.resize(L1U);
+    wsx.AVGF_data.resize(L1U * WW_);
+    wsx.FJTOP_data.resize(WW_);
+    wsx.FJBOT_data.resize(WW_);
+    wsx.FIBOT_data.resize(5 * WW_);
+    wsx.FSBOT_data.resize(WW_);
+    wsx.FJFLX_data.resize(L1U * WW_);
+    wsx.FLXD_data.resize(L1U * WW_);
+    wsx.FLXD0_data.resize(WW_);
+    wsx.FFF_data.resize(W_ * L1U);
+    wsx.FFX.resize(S_ * L1U);
+    wsx.FFXNET.resize(S_ * 8);
+    wsx.FLXJ.resize(L1U);
+    wsx.VALJL_flat.resize(LU * NJXU);
+
     // --- 2. Load column arrays ---
-    std::vector<double> PPJ(L1U + 1), ZZJ(L1U + 1);
-    std::vector<double> TTJ(L1U), HHJ(L1U), DDJ(L1U), RRJ(L1U);
-    std::vector<double> OOJ(L1U), CCJ(L1U);
+    // PPJ/ZZJ/TTJ/HHJ/DDJ/RRJ/OOJ/CCJ are FULLY WRITTEN in the loop below
+    // (all indices) before any read → no explicit zeroing required.
+    std::vector<double>& PPJ = wsx.PPJ;
+    std::vector<double>& ZZJ = wsx.ZZJ;
+    std::vector<double>& TTJ = wsx.TTJ;
+    std::vector<double>& HHJ = wsx.HHJ;
+    std::vector<double>& DDJ = wsx.DDJ;
+    std::vector<double>& RRJ = wsx.RRJ;
+    std::vector<double>& OOJ = wsx.OOJ;
+    std::vector<double>& CCJ = wsx.CCJ;
 
     for (int L = 0; L < L1U; ++L) {
         PPJ[L] = PPP[L];
@@ -1239,7 +1336,11 @@ inline void PHOTO_JX(
     // PHOTO_JX_PART2_PLACEHOLDER
 
     // --- 3. Convert geopotential→geometric if ATM0 >= 3; compute AMG ---
-    std::vector<double> AMG(L1U, 1.0);
+    // AMG: previously `std::vector<double> AMG(L1U, 1.0)`. Initialized to 1.0
+    // then only conditionally overwritten (ATM0 >= 3) → MUST be re-filled with
+    // 1.0 each call to preserve behavior.
+    std::vector<double>& AMG = wsx.AMG;
+    std::fill(AMG.begin(), AMG.end(), 1.0);
 
     if (state.ATM0 >= 3) {
         // Convert geopotential to geometric heights
@@ -1254,8 +1355,10 @@ inline void PHOTO_JX(
     }
 
     // --- 4. Compute Air Mass Factors (AMF) ---
-    const int AMF_dim = L1U + 1;
-    std::vector<double> AMF_data(AMF_dim * AMF_dim, 0.0);
+    // AMF_data is zeroed internally by each SPHERE* routine (verified: SPHERE1F
+    // loops over all dim*dim entries setting AMF[i]=0.0) → no external zero.
+    const int AMF_dim = AMF_dim_;
+    std::vector<double>& AMF_data = wsx.AMF_data;
 
     if (state.ATM0 == 0) {
         SPHERE1F(U0, RAD, ZZJ.data(), ZZHT, AMF_data.data(), L1U);
@@ -1268,11 +1371,19 @@ inline void PHOTO_JX(
 
     // --- 5. Per-layer optical depth accumulation ---
     // Local scattering arrays: OD[S_][L1U], SSA[S_][L1U], SLEG[8][S_][L1U]
-    std::vector<double> OD_arr(S_ * L1U, 0.0);
-    std::vector<double> SSA_arr(S_ * L1U, 0.0);
-    std::vector<double> SLEG_arr(8 * S_ * L1U, 0.0);
-    std::vector<double> OD600(L1U, 0.0);
-    std::vector<double> FFXTAU(S_ * 4, 0.0);
+    // ACCUMULATED INTO (+=) across cloud/aerosol/gas contributions → MUST be
+    // zeroed each call. OD600 is set to 0 per-L then += → zero for safety.
+    // FFXTAU accumulated (+=) → zero each call.
+    std::vector<double>& OD_arr = wsx.OD_arr;
+    std::vector<double>& SSA_arr = wsx.SSA_arr;
+    std::vector<double>& SLEG_arr = wsx.SLEG_arr;
+    std::vector<double>& OD600 = wsx.OD600;
+    std::vector<double>& FFXTAU = wsx.FFXTAU;
+    std::fill(OD_arr.begin(), OD_arr.end(), 0.0);
+    std::fill(SSA_arr.begin(), SSA_arr.end(), 0.0);
+    std::fill(SLEG_arr.begin(), SLEG_arr.end(), 0.0);
+    std::fill(OD600.begin(), OD600.end(), 0.0);
+    std::fill(FFXTAU.begin(), FFXTAU.end(), 0.0);
 
     // Access macros for column-major arrays
     // OD(K,L) -> OD_arr[K + S_*L], SSA(K,L) -> SSA_arr[K + S_*L]
@@ -1460,8 +1571,13 @@ inline void PHOTO_JX(
 
     // --- 6. Transform OD/SLEG to DTAUX/POMEGAX format and copy OD600→OD18 ---
     // DTAUX(L,K) = OD(K,L), POMEGAX(I,L,K) = SLEG(I,K,L)
-    std::vector<double> DTAUX_data(L1U * WW, 0.0);
-    std::vector<double> POMEGAX_data(8 * L1U * WW, 0.0);
+    // Only the S_ active bins are written (K in [0,S_)), while the buffers are
+    // sized L1U*WW / 8*L1U*WW. WW == S_ for v8.0 so every element is written,
+    // but zero for safety to preserve the fresh-allocation semantics.
+    std::vector<double>& DTAUX_data = wsx.DTAUX_data;
+    std::vector<double>& POMEGAX_data = wsx.POMEGAX_data;
+    std::fill(DTAUX_data.begin(), DTAUX_data.end(), 0.0);
+    std::fill(POMEGAX_data.begin(), POMEGAX_data.end(), 0.0);
 
     for (int K = 0; K < S_; ++K) {
         for (int L = 0; L < L1U; ++L) {
@@ -1477,7 +1593,10 @@ inline void PHOTO_JX(
     }
 
     // --- 7. Call EXTRAL1 to determine sub-layer insertion ---
-    std::vector<int> JXTRA(L1U, 0);
+    // JXTRA is fully written by EXTRAL1 (all L1U entries) before use → no
+    // explicit zeroing required. Zero anyway for safety/robustness.
+    std::vector<int>& JXTRA = wsx.JXTRA;
+    std::fill(JXTRA.begin(), JXTRA.end(), 0);
     EXTRAL1(OD600.data(), L1U, N_, state.ATAU, state.ATAU0, JXTRA.data());
     // PHOTO_JX_PART9_PLACEHOLDER
 
@@ -1499,15 +1618,27 @@ inline void PHOTO_JX(
     // RFL view: the input is flat [5*(W_+W_r)], column-major
     mdspan_2d rfl_view(RFL_flat, 5, WW);
 
-    // Output arrays for OPMIE
-    std::vector<double> AVGF_data(L1U * WW, 0.0);
-    std::vector<double> FJTOP_data(WW, 0.0);
-    std::vector<double> FJBOT_data(WW, 0.0);
-    std::vector<double> FIBOT_data(5 * WW, 0.0);
-    std::vector<double> FSBOT_data(WW, 0.0);
-    std::vector<double> FJFLX_data(L1U * WW, 0.0);
-    std::vector<double> FLXD_data(L1U * WW, 0.0);
-    std::vector<double> FLXD0_data(WW, 0.0);
+    // Output arrays for OPMIE.
+    // OPMIE ACCUMULATES into flxd (flxd(l,k) += ...) and flxd0 (flxd0(k) +=
+    // ...), so FLXD_data and FLXD0_data MUST be zeroed each call. The other
+    // outputs (avgf/fjtop/fjbot/fibot/fsbot/fjflx) are direct-assigned by
+    // OPMIE, but we zero all of them for safety (correctness first).
+    std::vector<double>& AVGF_data = wsx.AVGF_data;
+    std::vector<double>& FJTOP_data = wsx.FJTOP_data;
+    std::vector<double>& FJBOT_data = wsx.FJBOT_data;
+    std::vector<double>& FIBOT_data = wsx.FIBOT_data;
+    std::vector<double>& FSBOT_data = wsx.FSBOT_data;
+    std::vector<double>& FJFLX_data = wsx.FJFLX_data;
+    std::vector<double>& FLXD_data = wsx.FLXD_data;
+    std::vector<double>& FLXD0_data = wsx.FLXD0_data;
+    std::fill(AVGF_data.begin(), AVGF_data.end(), 0.0);
+    std::fill(FJTOP_data.begin(), FJTOP_data.end(), 0.0);
+    std::fill(FJBOT_data.begin(), FJBOT_data.end(), 0.0);
+    std::fill(FIBOT_data.begin(), FIBOT_data.end(), 0.0);
+    std::fill(FSBOT_data.begin(), FSBOT_data.end(), 0.0);
+    std::fill(FJFLX_data.begin(), FJFLX_data.end(), 0.0);
+    std::fill(FLXD_data.begin(), FLXD_data.end(), 0.0);
+    std::fill(FLXD0_data.begin(), FLXD0_data.end(), 0.0);
 
     mdspan_2d_mut avgf_view(AVGF_data.data(), L1U, WW);
     mdspan_1d_mut fjtop_view(FJTOP_data.data(), WW);
@@ -1518,8 +1649,10 @@ inline void PHOTO_JX(
     mdspan_2d_mut flxd_view(FLXD_data.data(), L1U, WW);
     mdspan_1d_mut flxd0_view(FLXD0_data.data(), WW);
 
-    // Workspace for OPMIE
-    RadiativeSolver::Workspace ws;
+    // Workspace for OPMIE — hoisted into the thread_local scratch so its
+    // internal buffers persist across calls; ws.resize(nd) is a cheap no-op
+    // when nd is unchanged.
+    RadiativeSolver::Workspace& ws = wsx.ws;
     int jaddto = 0;
     for (int l = 0; l < L1U; ++l) jaddto += JXTRA[l];
     int nd = 2 * L1U + 2 * jaddto + 1;
@@ -1534,8 +1667,11 @@ inline void PHOTO_JX(
     // --- 9. Compute FFF (actinic flux * solar * FL) and call JRATET ---
 
     // --- 9. Compute FFF (actinic flux * solar * FL) and call JRATET ---
-    // FFF(K,L) = SOLF * FL(K) * AVGF(L,K) for active bins
-    std::vector<double> FFF_data(W_ * L1U, 0.0);
+    // FFF(K,L) = SOLF * FL(K) * AVGF(L,K) for active bins.
+    // Only active bins (LDOKR>0) and L in [0,LU) are written; other elements
+    // must remain 0 → zero each call.
+    std::vector<double>& FFF_data = wsx.FFF_data;
+    std::fill(FFF_data.begin(), FFF_data.end(), 0.0);
     double PREF1 = 0.0, PREF2 = 0.0;
 
     for (int K = 0; K < W_; ++K) {
@@ -1552,8 +1688,12 @@ inline void PHOTO_JX(
     // JRATET expects fff(k, l) with k=wavelength, l=layer
     mdspan_2d_mut fff_view(FFF_data.data(), W_, L1U);
 
-    // Build SpecData from CloudJState for JRATET
-    Photolysis::SpecData spec;
+    // Build SpecData from CloudJState for JRATET.
+    // `state` is const and its cross-section tables do not change between
+    // calls, so we build the flat SpecData once (or whenever NJX changes) and
+    // reuse it from the thread_local workspace. Profiled at ~0.8%.
+    Photolysis::SpecData& spec = wsx.spec;
+    if (wsx.spec_njx != state.NJX) {
     spec.nw = W_;
     spec.ns = S_;
     spec.njx = state.NJX;
@@ -1600,24 +1740,36 @@ inline void PHOTO_JX(
             }
         }
     }
+        wsx.spec_njx = state.NJX;
+    } // end SpecData (re)build guard
     // PHOTO_JX_PART11_PLACEHOLDER
 
-    // Call JRATET to compute J-values
-    std::vector<std::vector<double>> VALJL;
+    // Call JRATET to compute J-values into the reused flat buffer.
+    // Flat layout valjl_flat[L*NJXU + J] (row-major, matches old [L][J]).
+    std::vector<double>& VALJL = wsx.VALJL_flat;
     Photolysis::JRATET(PPJ, TTJ, fff_view, VALJL, spec, LU, NJXU);
 
-    // Copy VALJL to output VALJXX [LU][NJXU] column-major
+    // Copy VALJL to output VALJXX [LU][NJXU] column-major. This is the
+    // IDENTICAL transpose as before: VALJXX[L + LU*J] <- valjl[L][J], now
+    // sourced from the flat buffer valjl[L*NJXU + J] (same L, same J).
     for (int L = 0; L < LU; ++L) {
         for (int J = 0; J < NJXU; ++J) {
-            VALJXX[L + LU * J] = VALJL[L][J];
+            VALJXX[L + LU * J] = VALJL[L * NJXU + J];
         }
     }
 
     // --- 10. Compute heating rates and energy budget ---
-    // FFX(K,L) accumulates fractional absorbed flux per super-bin per layer
-    std::vector<double> FFX(S_ * L1U, 0.0);
-    std::vector<double> FFXNET(S_ * 8, 0.0);
-    std::vector<double> FLXJ(L1U, 0.0);
+    // FFX(K,L) accumulates fractional absorbed flux per super-bin per layer.
+    // FFX and FFXNET are ACCUMULATED INTO (+=) → MUST be zeroed each call.
+    // FLXJ is fully overwritten (FLXJ[0], FLXJ[1..LU-1], FLXJ[LU]) before it
+    // is read within each KG iteration → no zeroing strictly needed, zeroed
+    // for safety.
+    std::vector<double>& FFX = wsx.FFX;
+    std::vector<double>& FFXNET = wsx.FFXNET;
+    std::vector<double>& FLXJ = wsx.FLXJ;
+    std::fill(FFX.begin(), FFX.end(), 0.0);
+    std::fill(FFXNET.begin(), FFXNET.end(), 0.0);
+    std::fill(FLXJ.begin(), FLXJ.end(), 0.0);
     #define FFX_IDX(K,L)    ((K) + S_*(L))
     #define FFXNET_IDX(K,J) ((K) + S_*(J))
 

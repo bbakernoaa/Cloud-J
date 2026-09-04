@@ -18,6 +18,7 @@ Usage:
 import argparse
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 import time
@@ -165,144 +166,160 @@ def main() -> None:
         if profile.name not in [p.name for p in seen_profiles]:
             seen_profiles.append(profile)
 
-    for profile in seen_profiles:
-        # Prepare the profile file (modify atmos_PTClds.dat)
-        try:
-            prepare_profile(profile, tables_dir)
-        except FileNotFoundError as e:
-            print(f"Warning: Could not prepare profile '{profile.name}': {e}", file=sys.stderr)
-            # Add failed results for all SZAs in this profile
-            for sza in szas:
+    # Back up the original atmos_PTClds.dat before any profile preparation
+    # mutates it in place. This file is shared with the standalone executables
+    # and the ctest comparison tests, so we must always restore it afterward.
+    profile_path = os.path.join(tables_dir, "atmos_PTClds.dat")
+    backup_path = None
+    if os.path.isfile(profile_path):
+        backup_path = profile_path + ".benchmark_backup"
+        shutil.copy2(profile_path, backup_path)
+
+    try:
+        for profile in seen_profiles:
+            # Prepare the profile file (modify atmos_PTClds.dat)
+            try:
+                prepare_profile(profile, tables_dir)
+            except FileNotFoundError as e:
+                print(f"Warning: Could not prepare profile '{profile.name}': {e}", file=sys.stderr)
+                # Add failed results for all SZAs in this profile
+                for sza in szas:
+                    results.append(ScenarioResult(
+                        profile_name=profile.name,
+                        sza=sza,
+                        fortran_time=0.0,
+                        cpp_time=0.0,
+                        speedup=0.0,
+                        max_relative_error=0.0,
+                        mean_relative_error=0.0,
+                        flagged=False,
+                        fortran_failed=True,
+                        cpp_failed=True,
+                    ))
+                continue
+
+            # Run Fortran executable
+            fortran_result = run_executable(fortran_path, working_dir)
+
+            # Run C++ executable (with --benchmark flag if requested)
+            cpp_extra_args = ["--benchmark"] if args.benchmark_iters else None
+            cpp_result = run_executable(cpp_path, working_dir, extra_args=cpp_extra_args)
+
+            # Handle non-zero exit codes
+            fortran_failed = fortran_result.returncode != 0
+            cpp_failed = cpp_result.returncode != 0
+
+            if fortran_failed:
+                print(
+                    f"Warning: Fortran executable failed for profile '{profile.name}' "
+                    f"(exit code {fortran_result.returncode}): "
+                    f"{fortran_result.error_message}",
+                    file=sys.stderr,
+                )
+
+            if cpp_failed:
+                print(
+                    f"Warning: C++ executable failed for profile '{profile.name}' "
+                    f"(exit code {cpp_result.returncode}): "
+                    f"{cpp_result.error_message}",
+                    file=sys.stderr,
+                )
+
+            # If both failed, record failure for all SZAs and continue
+            if fortran_failed and cpp_failed:
+                for sza in szas:
+                    results.append(ScenarioResult(
+                        profile_name=profile.name,
+                        sza=sza,
+                        fortran_time=0.0,
+                        cpp_time=0.0,
+                        speedup=0.0,
+                        max_relative_error=0.0,
+                        mean_relative_error=0.0,
+                        flagged=False,
+                        fortran_failed=True,
+                        cpp_failed=True,
+                    ))
+                continue
+
+            # Parse J-values from outputs
+            fortran_blocks = parse_jvalues(fortran_result.stdout) if not fortran_failed else []
+            cpp_blocks = parse_jvalues(cpp_result.stdout) if not cpp_failed else []
+
+            # Compute per-SZA timing (divide total time by number of SZA blocks)
+            fortran_per_sza = (
+                fortran_result.elapsed_seconds / num_sza_blocks
+                if num_sza_blocks > 0 and not fortran_failed
+                else 0.0
+            )
+            cpp_per_sza = (
+                cpp_result.elapsed_seconds / num_sza_blocks
+                if num_sza_blocks > 0 and not cpp_failed
+                else 0.0
+            )
+
+            # Process each SZA block
+            for sza_idx, sza in enumerate(szas):
+                # Get the corresponding J-value blocks
+                fortran_jvals = (
+                    fortran_blocks[sza_idx].values
+                    if sza_idx < len(fortran_blocks)
+                    else {}
+                )
+                cpp_jvals = (
+                    cpp_blocks[sza_idx].values
+                    if sza_idx < len(cpp_blocks)
+                    else {}
+                )
+
+                # Compute error metrics if we have data from both
+                if fortran_jvals and cpp_jvals and not fortran_failed and not cpp_failed:
+                    error_metrics = compute_error_metrics(
+                        fortran_jvals, cpp_jvals, args.tolerance
+                    )
+                    speedup = compute_speedup(fortran_per_sza, cpp_per_sza)
+                else:
+                    from benchmark.types import ErrorMetrics
+
+                    error_metrics = ErrorMetrics(
+                        max_relative_error=0.0,
+                        mean_relative_error=0.0,
+                        num_elements=0,
+                        num_zero_reference=0,
+                        flagged=False,
+                    )
+                    speedup = 0.0
+
                 results.append(ScenarioResult(
                     profile_name=profile.name,
                     sza=sza,
-                    fortran_time=0.0,
-                    cpp_time=0.0,
-                    speedup=0.0,
-                    max_relative_error=0.0,
-                    mean_relative_error=0.0,
-                    flagged=False,
-                    fortran_failed=True,
-                    cpp_failed=True,
+                    fortran_time=fortran_per_sza,
+                    cpp_time=cpp_per_sza,
+                    speedup=speedup,
+                    max_relative_error=error_metrics.max_relative_error,
+                    mean_relative_error=error_metrics.mean_relative_error,
+                    flagged=error_metrics.flagged,
+                    fortran_failed=fortran_failed,
+                    cpp_failed=cpp_failed,
                 ))
-            continue
 
-        # Run Fortran executable
-        fortran_result = run_executable(fortran_path, working_dir)
+        # Generate terminal report
+        report = format_terminal_report(results, args.tolerance)
+        print(report)
 
-        # Run C++ executable (with --benchmark flag if requested)
-        cpp_extra_args = ["--benchmark"] if args.benchmark_iters else None
-        cpp_result = run_executable(cpp_path, working_dir, extra_args=cpp_extra_args)
+        # Write structured output
+        if args.format == "json":
+            write_json_output(results, args.output, tolerance=args.tolerance)
+        else:
+            write_csv_output(results, args.output)
 
-        # Handle non-zero exit codes
-        fortran_failed = fortran_result.returncode != 0
-        cpp_failed = cpp_result.returncode != 0
-
-        if fortran_failed:
-            print(
-                f"Warning: Fortran executable failed for profile '{profile.name}' "
-                f"(exit code {fortran_result.returncode}): "
-                f"{fortran_result.error_message}",
-                file=sys.stderr,
-            )
-
-        if cpp_failed:
-            print(
-                f"Warning: C++ executable failed for profile '{profile.name}' "
-                f"(exit code {cpp_result.returncode}): "
-                f"{cpp_result.error_message}",
-                file=sys.stderr,
-            )
-
-        # If both failed, record failure for all SZAs and continue
-        if fortran_failed and cpp_failed:
-            for sza in szas:
-                results.append(ScenarioResult(
-                    profile_name=profile.name,
-                    sza=sza,
-                    fortran_time=0.0,
-                    cpp_time=0.0,
-                    speedup=0.0,
-                    max_relative_error=0.0,
-                    mean_relative_error=0.0,
-                    flagged=False,
-                    fortran_failed=True,
-                    cpp_failed=True,
-                ))
-            continue
-
-        # Parse J-values from outputs
-        fortran_blocks = parse_jvalues(fortran_result.stdout) if not fortran_failed else []
-        cpp_blocks = parse_jvalues(cpp_result.stdout) if not cpp_failed else []
-
-        # Compute per-SZA timing (divide total time by number of SZA blocks)
-        fortran_per_sza = (
-            fortran_result.elapsed_seconds / num_sza_blocks
-            if num_sza_blocks > 0 and not fortran_failed
-            else 0.0
-        )
-        cpp_per_sza = (
-            cpp_result.elapsed_seconds / num_sza_blocks
-            if num_sza_blocks > 0 and not cpp_failed
-            else 0.0
-        )
-
-        # Process each SZA block
-        for sza_idx, sza in enumerate(szas):
-            # Get the corresponding J-value blocks
-            fortran_jvals = (
-                fortran_blocks[sza_idx].values
-                if sza_idx < len(fortran_blocks)
-                else {}
-            )
-            cpp_jvals = (
-                cpp_blocks[sza_idx].values
-                if sza_idx < len(cpp_blocks)
-                else {}
-            )
-
-            # Compute error metrics if we have data from both
-            if fortran_jvals and cpp_jvals and not fortran_failed and not cpp_failed:
-                error_metrics = compute_error_metrics(
-                    fortran_jvals, cpp_jvals, args.tolerance
-                )
-                speedup = compute_speedup(fortran_per_sza, cpp_per_sza)
-            else:
-                from benchmark.types import ErrorMetrics
-
-                error_metrics = ErrorMetrics(
-                    max_relative_error=0.0,
-                    mean_relative_error=0.0,
-                    num_elements=0,
-                    num_zero_reference=0,
-                    flagged=False,
-                )
-                speedup = 0.0
-
-            results.append(ScenarioResult(
-                profile_name=profile.name,
-                sza=sza,
-                fortran_time=fortran_per_sza,
-                cpp_time=cpp_per_sza,
-                speedup=speedup,
-                max_relative_error=error_metrics.max_relative_error,
-                mean_relative_error=error_metrics.mean_relative_error,
-                flagged=error_metrics.flagged,
-                fortran_failed=fortran_failed,
-                cpp_failed=cpp_failed,
-            ))
-
-    # Generate terminal report
-    report = format_terminal_report(results, args.tolerance)
-    print(report)
-
-    # Write structured output
-    if args.format == "json":
-        write_json_output(results, args.output, tolerance=args.tolerance)
-    else:
-        write_csv_output(results, args.output)
-
-    print(f"\nResults written to: {args.output}")
+        print(f"\nResults written to: {args.output}")
+    finally:
+        # Always restore the original atmos_PTClds.dat so we never leave the
+        # shared table file mutated (it is also read by the standalone
+        # executables and the ctest comparison tests).
+        if backup_path is not None and os.path.isfile(backup_path):
+            shutil.move(backup_path, profile_path)
 
 
 if __name__ == "__main__":

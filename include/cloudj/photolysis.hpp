@@ -58,10 +58,14 @@ JRATET(const std::vector<double> &ppj, // pressure edges [lu + 1]
        const std::vector<double> &ttj, // mid-layer temperatures [lu + 1]
        std::experimental::mdspan<double, std::experimental::dextents<size_t, 2>,
                                  std::experimental::layout_left>
-           fff,                                 // mean actinic fluxes [W_][lu]
-       std::vector<std::vector<double>> &valjl, // [lu][njx]
+           fff,                       // mean actinic fluxes [W_][lu]
+       std::vector<double> &valjl,    // flat [lu * njxu], row-major [l][j]
        const SpecData &spec, int lu, int njxu) {
-  valjl.assign(lu, std::vector<double>(njxu, 0.0));
+  // Flat, caller-reused buffer. Row-major layout valjl[l * njxu + j] matches
+  // the previous nested valjl[l][j] exactly. We size + zero the whole buffer
+  // (lu*njxu) so columns j in [spec.njx, njxu) stay 0, identical to the old
+  // valjl.assign(lu, vector(njxu, 0.0)) behavior.
+  valjl.assign(static_cast<size_t>(lu) * njxu, 0.0);
 
   for (int l = 0; l < lu; ++l) {
     double tt = ttj[l];
@@ -116,7 +120,7 @@ JRATET(const std::vector<double> &ppj, // pressure edges [lu + 1]
     }
 
     for (int j = 0; j < spec.njx; ++j) {
-      valjl[l][j] = valj[j];
+      valjl[l * njxu + j] = valj[j];
     }
   }
 }

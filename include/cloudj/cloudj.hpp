@@ -184,10 +184,17 @@ public:
     const std::vector<double> &ttj = profile.get_temperatures();
 
     // Invoke JRATET to calculate temperature/pressure interpolated cross
-    // sections Passing the solved mean actinic flux (fjact) to evaluate final
-    // J-values
-    Photolysis::JRATET(ppj, ttj, fjact, rates.j_values, spec_data, lu,
+    // sections. Passing the solved mean actinic flux (fjact) to evaluate final
+    // J-values. JRATET now writes a flat row-major buffer [l*njx + j]; unpack
+    // it into the public OutputRates::j_values nested layout.
+    std::vector<double> valjl_flat;
+    Photolysis::JRATET(ppj, ttj, fjact, valjl_flat, spec_data, lu,
                        spec_data.njx);
+    for (int l = 0; l < lu; ++l) {
+      for (int j = 0; j < spec_data.njx; ++j) {
+        rates.j_values[l][j] = valjl_flat[l * spec_data.njx + j];
+      }
+    }
 
     return rates;
   }
