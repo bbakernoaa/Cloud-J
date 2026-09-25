@@ -104,6 +104,15 @@ if(CLOUDJ_CPP_PORT)
   target_compile_definitions(test_cloud_jx PRIVATE MODEL_STANDALONE)
   set_target_properties(test_cloud_jx PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
   add_test(NAME TestCloudJX COMMAND test_cloud_jx)
+
+  add_executable(test_library_api ${CMAKE_CURRENT_SOURCE_DIR}/../tests/cpp/test_library_api.cpp)
+  target_compile_definitions(test_library_api PRIVATE MODEL_STANDALONE
+    CLOUDJ_TEST_TABLES_DIR="${CMAKE_BINARY_DIR}/bin/tables"
+    CLOUDJ_TEST_GOLDEN_DIR="${CMAKE_SOURCE_DIR}/test/expected_output"
+    CLOUDJ_TEST_FORTRAN7="${CMAKE_SOURCE_DIR}/bin/fort.7")
+  set_target_properties(test_library_api PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+  add_dependencies(test_library_api copy_table_data)
+  add_test(NAME TestLibraryAPI COMMAND test_library_api)
 endif()
 
 

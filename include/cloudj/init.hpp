@@ -424,6 +424,19 @@ inline void RD_XXX(const std::string& datadir, CloudJState& state, int& rc) {
         state.NJX = jj_new;
     }
 
+    // Need to check that TQQ (= T(K) or p(hPa)) is monotonically increasing
+    // (Fortran RD_XXX in cldj_init_mod.F90, after the TROP-only collapse).
+    for (int J = 0; J < state.NJX; ++J) {
+        if ((state.LQQ[J] == 3) && (state.TQQ[1][J] >= state.TQQ[2][J])) {
+            CLOUDJ_ERROR("TQQ out of order", thisloc, rc);
+            return;
+        }
+        if ((state.LQQ[J] == 2) && (state.TQQ[0][J] >= state.TQQ[1][J])) {
+            CLOUDJ_ERROR("TQQ out of order", thisloc, rc);
+            return;
+        }
+    }
+
     // Zero FL for reduced wavelength bins
     if (state.NWBIN == 12) {
         for (int IW = 0; IW < 4; ++IW) state.FL[IW] = 0.0;
@@ -466,23 +479,37 @@ inline void RD_CLD(const std::string& datadir, CloudJState& state, int& rc) {
         state.DCC[K] = std::stod(line.substr(12, 8));
 
         // Read data for each wavelength bin from 12 to SX_ (Fortran: J=12,SX_)
+        // The reference reads each row with a fixed-column format
+        //   (i2,1x,f5.2,f5.1,f7.1,f5.3,e8.1,f6.3,f8.5,7f6.3)
+        // so fields must be sliced by column, not split on whitespace. Some
+        // rows (e.g. the largest ice effective radius) jam two numeric fields
+        // together with no separator ("95.519927." = Reff 95.5 + cross-section
+        // 19927.); a token-based read mis-parses these and silently zeroes the
+        // trailing phase-function values.
         for (int J = 11; J < SX_; ++J) {
             for (int I = 0; I < state.MCC; ++I) {
                 std::getline(iss, line);
-                std::istringstream ls(line);
-                int JCC;
-                double wcc, rcc, gcc, xndr, xndi;
-                ls >> JCC >> wcc >> rcc >> gcc >> xndr >> xndi;
-                double qcc, scc;
-                ls >> qcc >> scc;
-                state.WCC[J][K] = wcc;
-                state.RCC[I][K] = rcc;
-                state.GCC[I][K] = gcc;
-                state.QCC[J][I][K] = qcc;
-                state.SCC[J][I][K] = scc;
-                // Read P2..P8
+                // Pad so short/blank-padded rows still yield every field.
+                line.resize(90, ' ');
+                auto fld = [&line](int pos, int width) -> double {
+                    return std::stod(line.substr(pos, width));
+                };
+                int JCC = static_cast<int>(fld(0, 2));
+                if (JCC != J + 1) {
+                    // Matches the Fortran err/stop path on a malformed row.
+                    CLOUDJ_ERROR("Error in read", thisloc, rc);
+                    return;
+                }
+                state.WCC[J][K] = fld(3, 5);
+                state.RCC[I][K] = fld(8, 5);
+                state.GCC[I][K] = fld(13, 7);
+                // Reff index (XNDR) and imaginary index (XNDI) are not used
+                // downstream, but occupy columns 20-24 and 25-32.
+                state.QCC[J][I][K] = fld(33, 6);
+                state.SCC[J][I][K] = fld(39, 8);
+                // Columns 47 onward: 7 values -> PCC[1..7] (Fortran L=2..8).
                 for (int L = 1; L < 8; ++L) {
-                    ls >> state.PCC[L][J][I][K];
+                    state.PCC[L][J][I][K] = fld(47 + 6 * (L - 1), 6);
                 }
                 state.PCC[0][J][I][K] = 1.0;
             }

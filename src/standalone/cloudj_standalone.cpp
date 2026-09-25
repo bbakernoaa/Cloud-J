@@ -8,52 +8,15 @@
 #include <algorithm>
 #include <chrono>
 #include <cloudj/cloudj.hpp>
+#include <cloudj/column_builder.hpp>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
-#include <sstream>
 #include <string>
 #include <vector>
-
-// Convert a double to Fortran's e9.2 scientific formatting cleanly
-std::string format_fortran_e9_2(double val) {
-  if (std::abs(val) < 1e-99) {
-    return " 0.00E+00";
-  }
-  std::ostringstream ss;
-  ss << std::scientific << std::uppercase << std::setprecision(2) << val;
-  std::string s = ss.str();
-
-  size_t e_pos = s.find('E');
-  if (e_pos == std::string::npos) {
-    return " 0.00E+00";
-  }
-
-  std::string mantissa = s.substr(0, e_pos);
-  std::string exp_part = s.substr(e_pos + 1);
-
-  char exp_sign = '+';
-  if (exp_part[0] == '-' || exp_part[0] == '+') {
-    exp_sign = exp_part[0];
-    exp_part = exp_part.substr(1);
-  }
-
-  int exp_val = std::stoi(exp_part);
-  std::ostringstream exp_ss;
-  exp_ss << exp_sign << std::setw(2) << std::setfill('0') << exp_val;
-
-  std::string result = mantissa + "E" + exp_ss.str();
-  if (result[0] != '-') {
-    result = " " + result;
-  }
-  while (result.length() < 9) {
-    result = " " + result;
-  }
-  return result;
-}
 
 int main(int argc, char *argv[]) {
   std::string tables_dir = "tables";
@@ -135,219 +98,46 @@ int main(int argc, char *argv[]) {
   // =====================================================================
   // Read atmosphere file: tables/atmos_PTClds.dat
   // =====================================================================
-  std::string profile_filename = tables_dir + "/atmos_PTClds.dat";
-  std::ifstream infile(profile_filename);
-  if (!infile.is_open()) {
-    profile_filename = "./tables/atmos_PTClds.dat";
-    infile.open(profile_filename);
-    if (!infile.is_open()) {
-      std::cerr << "Error: Could not open profile file tables/atmos_PTClds.dat\n";
-      return 1;
-    }
-  }
-
-  std::string line;
-  int MONTH = 0, ILAT = 0;
-  double PSURF = 0.0;
-  double ALBEDO[5] = {};
-  double WIND = 0.0, CHLR = 0.0;
-
-  // Line 1: title (skip)
-  std::getline(infile, line);
-  // Line 2: MONTH, ILAT (format 2i5)
-  std::getline(infile, line);
-  MONTH = std::stoi(line.substr(0, 5));
-  ILAT  = std::stoi(line.substr(5, 5));
-  // Line 3: PSURF (format f5.0)
-  std::getline(infile, line);
-  PSURF = std::stod(line.substr(0, 5));
-  // Line 4: ALBEDO(5) (format f5.2)
-  std::getline(infile, line);
-  ALBEDO[4] = std::stod(line.substr(0, 5));
-  // Line 5: ALBEDO(1:4) (format 4f5.2)
-  std::getline(infile, line);
-  for (int i = 0; i < 4; ++i)
-    ALBEDO[i] = std::stod(line.substr(i * 5, 5));
-  // Line 6: WIND, CHLR
-  std::getline(infile, line);
+  // Parsing and column derivation live in the shared Column builder so the
+  // library API and this reference driver stay in lock-step.
+  CloudJ::Column::Inputs col_in;
   {
-    std::istringstream ss(line);
-    ss >> WIND >> CHLR;
-  }
-  // Line 7: header (skip)
-  std::getline(infile, line);
-
-  // Read L1_ (58) levels of atmosphere data
-  double ETAA[L2_] = {}, ETAB[L2_] = {};
-  double TINP[L1_] = {}, RHINP[L1_] = {}, ZOFL[L1_] = {};
-  double AER1[L1_] = {}, AER2[L1_] = {};
-  int    NAA1[L1_] = {}, NAA2[L1_] = {};
-
-  for (int L = 0; L < L1_; ++L) {
-    std::getline(infile, line);
-    std::istringstream ss(line);
-    int idx;
-    ss >> idx >> ETAA[L] >> ETAB[L] >> TINP[L] >> RHINP[L]
-       >> ZOFL[L] >> AER1[L] >> NAA1[L] >> AER2[L] >> NAA2[L];
-  }
-
-  // Read cloud header
-  std::getline(infile, line);
-
-  // Read LWEPAR cloud layers (reversed: LWEPAR down to 1)
-  double CLDFRW[LWEPAR] = {}, CLDLWCW[LWEPAR] = {}, CLDIWCW[LWEPAR] = {};
-  for (int L = LWEPAR - 1; L >= 0; --L) {
-    std::getline(infile, line);
-    std::istringstream ss(line);
-    int idx;
-    ss >> idx >> CLDFRW[L] >> CLDLWCW[L] >> CLDIWCW[L];
-  }
-  infile.close();
-
-  // =====================================================================
-  // Compute pressure edges
-  // =====================================================================
-  ETAA[L2_ - 1] = 0.0;
-  ETAB[L2_ - 1] = 0.0;
-  double PPP[L2_] = {};
-  for (int L = 0; L < L2_; ++L) {
-    PPP[L] = ETAA[L] + ETAB[L] * PSURF;
-  }
-
-  // =====================================================================
-  // Call ACLIM_FJX for O3, T, CH4 climatologies
-  // =====================================================================
-  double TTT[L1_] = {}, OOO[L1_] = {}, CH4[L1_] = {};
-  double O3[L1_] = {};
-
-  double YLAT = static_cast<double>(ILAT);
-  CloudJ::PhotoJX::ACLIM_FJX(MONTH, YLAT, PPP, TTT, O3, CH4, L1_, engine.get_state());
-
-  // Override T and RH from file (keep O3 from climatology)
-  double RRR[L1_] = {};
-  for (int L = 0; L < L1_; ++L) {
-    TTT[L] = TINP[L];
-    RRR[L] = RHINP[L];
-  }
-
-  // =====================================================================
-  // Compute altitudes, densities, O3/CH4 columns
-  // =====================================================================
-  double ZZZ[L2_] = {};
-  double DDD[L1_] = {};
-  double CCC[L1_] = {};
-
-  ZZZ[0] = 16.0e5 * std::log10(1013.25 / PPP[0]);  // cm
-
-  for (int L = 0; L < L_; ++L) {
-    DDD[L] = (PPP[L] - PPP[L + 1]) * CloudJ::MASFAC;
-    double SCALEH = 1.3806e-19 * CloudJ::MASFAC * TTT[L];
-    ZZZ[L + 1] = ZZZ[L] - (std::log(PPP[L + 1] / PPP[L]) * SCALEH);
-    OOO[L] = DDD[L] * O3[L] * 1.0e-6;
-    CCC[L] = DDD[L] * CH4[L] * 1.0e-9;
-  }
-  // Top layer L_ (index L_ = L1_-1 in 0-based)
-  {
-    int L = L_;  // = 57, the extra top layer
-    ZZZ[L + 1] = ZZZ[L] + CloudJ::ZZHT;
-    DDD[L] = (PPP[L] - PPP[L + 1]) * CloudJ::MASFAC;
-    OOO[L] = DDD[L] * O3[L] * 1.0e-6;
-    CCC[L] = DDD[L] * CH4[L] * 1.0e-9;
-  }
-
-  // =====================================================================
-  // H2O profile
-  // =====================================================================
-  double HHH[L1_] = {};
-  double HHH0 = 0.030;
-  for (int L = 0; L < L1_; ++L) {
-    HHH[L] = DDD[L] * std::max(HHH0 * std::exp(-ZZZ[L] / 2.2e5), 2.0e-6);
-  }
-
-  // =====================================================================
-  // Aerosols setup
-  // Layout: column-major [L1_][AN_], accessed as arr[L + L1_ * M]
-  // =====================================================================
-  double AERSP[L1_ * CloudJ::AN_] = {};
-  int    NDXAER[L1_ * CloudJ::AN_] = {};
-
-  for (int L = 0; L < L_; ++L) {
-    NDXAER[L + L1_ * 0] = NAA1[L];
-    AERSP[L + L1_ * 0]  = AER1[L];
-    NDXAER[L + L1_ * 1] = NAA2[L];
-    AERSP[L + L1_ * 1]  = AER2[L];
-  }
-
-  // =====================================================================
-  // Cloud processing
-  // =====================================================================
-  double CLF[L1_] = {};
-  double WLC[L_] = {}, WIC[L_] = {};
-  double LWP[L1_] = {}, IWP[L1_] = {};
-  double REFFL[L1_] = {}, REFFI[L1_] = {};
-  int    CLDIW[L1_] = {};
-  int    LTOP = LWEPAR;
-
-  // Check if all cloud fractions are negligible
-  double max_clf = 0.0;
-  for (int L = 0; L < LWEPAR; ++L)
-    max_clf = std::max(max_clf, CLDFRW[L]);
-
-  if (max_clf <= 0.005) {
-    // No clouds
-    std::memset(IWP, 0, sizeof(IWP));
-    std::memset(REFFI, 0, sizeof(REFFI));
-    std::memset(LWP, 0, sizeof(LWP));
-    std::memset(REFFL, 0, sizeof(REFFL));
-  }
-
-  for (int L = 0; L < LTOP; ++L) {
-    CLDIW[L] = 0;
-    double CF = CLDFRW[L];
-    if (CF > 0.005) {
-      CLF[L] = CF;
-      WLC[L] = CLDLWCW[L] / CF;
-      WIC[L] = CLDIWCW[L] / CF;
-      if (WLC[L] > 1.0e-11) CLDIW[L] = 1;
-      if (WIC[L] > 1.0e-11) CLDIW[L] = CLDIW[L] + 2;
-    } else {
-      CLF[L] = 0.0;
-      WLC[L] = 0.0;
-      WIC[L] = 0.0;
+    std::string profile_filename = tables_dir + "/atmos_PTClds.dat";
+    if (!CloudJ::Column::parse_atmos_ptclds(profile_filename, col_in)) {
+      profile_filename = "./tables/atmos_PTClds.dat";
+      if (!CloudJ::Column::parse_atmos_ptclds(profile_filename, col_in)) {
+        std::cerr << "Error: Could not open profile file tables/atmos_PTClds.dat\n";
+        return 1;
+      }
     }
   }
 
-  // Derive R-effective for clouds
-  for (int L = 0; L < LTOP; ++L) {
-    // Ice clouds
-    if (WIC[L] > 1.0e-12) {
-      double PDEL = PPP[L] - PPP[L + 1];
-      double ZDEL = (ZZZ[L + 1] - ZZZ[L]) * 0.01;  // m
-      IWP[L] = 1000.0 * WIC[L] * PDEL * CloudJ::G100;  // g/m2
-      double ICWC = IWP[L] / ZDEL;  // g/m3
-      REFFI[L] = 164.0 * std::pow(ICWC, 0.23);
-    } else {
-      IWP[L] = 0.0;
-      REFFI[L] = 0.0;
-    }
-    // Water clouds
-    if (WLC[L] > 1.0e-12) {
-      double PMID = 0.5 * (PPP[L] + PPP[L + 1]);
-      double PDEL = PPP[L] - PPP[L + 1];
-      double F1 = 0.005 * (PMID - 610.0);
-      F1 = std::min(1.0, std::max(0.0, F1));
-      LWP[L] = 1000.0 * WLC[L] * PDEL * CloudJ::G100;  // g/m2
-      REFFL[L] = 9.6 * F1 + 12.68 * (1.0 - F1);
-    } else {
-      LWP[L] = 0.0;
-      REFFL[L] = 0.0;
-    }
-  }
+  CloudJ::Column::Derived col;
+  CloudJ::Column::build_column(col_in, engine.get_state(), col);
 
-  // Copy CLF back to CLDFRW for use in SZA loop
-  for (int L = 0; L < LTOP; ++L) {
-    CLDFRW[L] = CLF[L];
-  }
+  const double* ALBEDO = col_in.albedo;
+  const double WIND = col_in.wind;
+  const double CHLR = col_in.chlr;
+
+  // Aliases into the derived column, matching the names the solver calls below
+  // use. CLF is mutated in place by CLOUD_JX and reset from CLF0 each call.
+  double* const PPP = col.ppp.data();
+  double* const ZZZ = col.zzz.data();
+  double* const TTT = col.ttt.data();
+  double* const DDD = col.ddd.data();
+  double* const RRR = col.rrr.data();
+  double* const OOO = col.ooo.data();
+  double* const CCC = col.ccc.data();
+  double* const HHH = col.hhh.data();
+  double* const LWP = col.lwp.data();
+  double* const IWP = col.iwp.data();
+  double* const REFFL = col.reffl.data();
+  double* const REFFI = col.reffi.data();
+  double* const CLF = col.clf.data();
+  const int* const CLDIW = col.cldiw.data();
+  double* const AERSP = col.aersp.data();
+  int* const NDXAER = col.ndxaer.data();
+  const int LTOP = col.ltop;
 
   // Total spectral bins
   constexpr int WW = CloudJ::W_ + CloudJ::W_r;  // = 18 + 0 = 18
@@ -369,24 +159,8 @@ int main(int argc, char *argv[]) {
     double SOLF = 1.0;
     double U0 = std::cos(SZA * CloudJ::CPI180);
 
-    double ANGLES[5];
-    ANGLES[0] = CloudJ::EMU[0];
-    ANGLES[1] = CloudJ::EMU[1];
-    ANGLES[2] = CloudJ::EMU[2];
-    ANGLES[3] = CloudJ::EMU[3];
-    ANGLES[4] = U0;
-
-    double RFL[5 * WW] = {};
-    for (int K = 0; K < CloudJ::NS2; ++K) {
-      double WAVEL = state.WL[K];
-      double OSA_dir[5] = {};
-      CloudJ::OSA::FJX_OSA(WAVEL, WIND, CHLR, ANGLES, OSA_dir);
-      for (int J = 0; J < 5; ++J) {
-        RFL[J + 5 * K] = OSA_dir[J];
-        // Override OSA with read-in ALBEDO values (same as normal mode)
-        RFL[J + 5 * K] = ALBEDO[J];
-      }
-    }
+    std::vector<double> RFL;
+    CloudJ::Column::build_rfl(state, U0, ALBEDO, WIND, CHLR, RFL);
 
     // Disable diagnostic printing so I/O does not contaminate timing.
     bool LPRTJ = false;
@@ -402,14 +176,12 @@ int main(int argc, char *argv[]) {
 
     auto t_start = std::chrono::high_resolution_clock::now();
     for (int iter = 0; iter < bench_iters; ++iter) {
-      // CLOUD_JX mutates CLF in place, so reset it from CLDFRW each call,
-      // matching how the normal SZA-scan loop resets it per iteration.
-      for (int L = 0; L < LTOP; ++L) {
-        CLF[L] = CLDFRW[L];
-      }
+      // CLOUD_JX mutates CLF in place, so reset it from the pristine copy each
+      // call, matching how the normal SZA-scan loop resets it per iteration.
+      CloudJ::Column::reset_cloud_fraction(col);
       rc = 0;
       engine.cloud_jx(
-          U0, SZA, RFL, SOLF, LPRTJ,
+          U0, SZA, RFL.data(), SOLF, LPRTJ,
           PPP, ZZZ, TTT, HHH, DDD, RRR, OOO, CCC,
           LWP, IWP, REFFL, REFFI, CLF, CLDIW, CLDCOR_in,
           AERSP, NDXAER,
@@ -453,39 +225,18 @@ int main(int argc, char *argv[]) {
     int NSZA = SZAscan[I];
     double SZA = static_cast<double>(NSZA);
 
-    // Reset CLF each SZA iteration
-    for (int L = 0; L < LTOP; ++L) {
-      CLF[L] = CLDFRW[L];
-    }
+    // CLOUD_JX consumes CLF in place; reset from the pristine copy each iteration.
+    CloudJ::Column::reset_cloud_fraction(col);
 
     int IRAN = 1;
     double SOLF = 1.0;
     double U0 = std::cos(SZA * CloudJ::CPI180);
 
-    // ANGLES for OSA: EMU(1:4) + U0
-    double ANGLES[5];
-    ANGLES[0] = CloudJ::EMU[0];
-    ANGLES[1] = CloudJ::EMU[1];
-    ANGLES[2] = CloudJ::EMU[2];
-    ANGLES[3] = CloudJ::EMU[3];
-    ANGLES[4] = U0;
-
-    // Compute OSA and set RFL (surface reflectivity)
-    // RFL layout: column-major [5][WW], where RFL[J + 5*K] = albedo for angle J, wvl K
-    double RFL[5 * WW] = {};
+    // Surface reflectivity: ocean OSA computed then overridden by the read-in
+    // broadband albedo, exactly as the reference driver does.
+    std::vector<double> RFL;
     const CloudJ::CloudJState& state = engine.get_state();
-
-    for (int K = 0; K < CloudJ::NS2; ++K) {
-      double WAVEL = state.WL[K];
-      double OSA_dir[5] = {};
-      CloudJ::OSA::FJX_OSA(WAVEL, WIND, CHLR, ANGLES, OSA_dir);
-
-      for (int J = 0; J < 5; ++J) {
-        RFL[J + 5 * K] = OSA_dir[J];
-        // Override OSA with read-in ALBEDO values (same as Fortran test)
-        RFL[J + 5 * K] = ALBEDO[J];
-      }
-    }
+    CloudJ::Column::build_rfl(state, U0, ALBEDO, WIND, CHLR, RFL);
 
     // Set LPRTJ = true to trigger PHOTO_JX printing (matches Fortran)
     bool LPRTJ = true;
@@ -523,7 +274,7 @@ int main(int argc, char *argv[]) {
     // Call CLOUD_JX
     rc = 0;
     engine.cloud_jx(
-        U0, SZA, RFL, SOLF, LPRTJ,
+        U0, SZA, RFL.data(), SOLF, LPRTJ,
         PPP, ZZZ, TTT, HHH, DDD, RRR, OOO, CCC,
         LWP, IWP, REFFL, REFFI, CLF, CLDIW, CLDCOR_in,
         AERSP, NDXAER,
@@ -537,31 +288,8 @@ int main(int argc, char *argv[]) {
       return 1;
     }
 
-    // Print J-values (since PHOTO_JX print not implemented in C++ port)
-    // Print J-values (since PHOTO_JX print not implemented in C++ port)
-    // Match Fortran format: "Fast-J ----J-values----"
-    int NJX = state.NJX;
-    std::cout << " Fast-J ----J-values----" << std::endl;
-    // Header line with species titles
-    std::cout << " L=  ";
-    for (int j = 0; j < NJX; ++j) {
-      // Fortran uses 72(a6,3x) format
-      std::string title = state.TITLEJX[j];
-      // Trim trailing spaces
-      while (!title.empty() && title.back() == ' ') title.pop_back();
-      std::cout << std::setw(6) << std::left << title << "   ";
-    }
-    std::cout << std::right << std::endl;
-
-    // Print levels L_ down to 1 (Fortran 1-based)
-    // VALJXX layout (column-major): VALJXX[l + L_ * j]
-    for (int l = L_ - 1; l >= 0; --l) {
-      std::cout << std::setw(3) << (l + 1);
-      for (int j = 0; j < NJX; ++j) {
-        std::cout << format_fortran_e9_2(VALJXX[l + L_ * j]);
-      }
-      std::cout << std::endl;
-    }
+    // The J-value table is printed from inside PHOTO_JX under LPRTJ, exactly
+    // as the Fortran driver does: one table per SZA, from the first QCA.
 
   } // end SZA scan
 

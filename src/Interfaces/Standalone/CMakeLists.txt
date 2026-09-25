@@ -50,5 +50,13 @@ if(CLOUDJ_CPP_PORT)
         if(CLOUDJ_CXX_MARCH_NATIVE)
                 target_compile_options(cloudj_standalone_cpp PRIVATE -march=native)
         endif()
+
+        # Match the Fortran Release optimisation flags (CloudJ_Fortran_FLAGS_-
+        # RELEASE_GNU = -O3 -funroll-loops): the hot solver loops are fixed-size
+        # 4x4 / 8-wide and benefit from unrolling the same way the Fortran does.
+        target_compile_options(cloudj_standalone_cpp PRIVATE
+                $<$<CONFIG:Release>:-funroll-loops>
+                $<$<CONFIG:RelWithDebInfo>:-funroll-loops>
+        )
 endif()
 

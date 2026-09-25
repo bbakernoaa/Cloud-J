@@ -10,12 +10,41 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <string>
 #include <vector>
 #include <experimental/mdspan.hpp>
 
 namespace CloudJ {
 namespace PhotoJX {
+
+// Convert a double to Fortran's E9.2 scientific editing (width 9, e.g.
+// " 4.71E-05"). Used by the LPRTJ diagnostic print in PHOTO_JX.
+inline std::string format_fortran_e9_2(double val) {
+    if (std::abs(val) < 1e-99) return " 0.00E+00";
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "%9.2E", val);
+    std::string s(buf);
+    // std::printf may emit a 3-digit exponent (e.g. 1.00E-005 on some
+    // platforms); Fortran E9.2 always uses a sign plus exactly 2 digits.
+    const size_t epos = s.find('E');
+    if (epos != std::string::npos) {
+        const std::string mant = s.substr(0, epos);
+        const std::string exp = s.substr(epos + 1);
+        char fixed[32];
+        if (exp[0] == '-') {
+            std::snprintf(fixed, sizeof(fixed), "%sE-%02d", mant.c_str(),
+                          std::atoi(exp.c_str() + 1));
+        } else {
+            std::snprintf(fixed, sizeof(fixed), "%sE+%02d", mant.c_str(),
+                          std::atoi(exp.c_str() + 1));
+        }
+        s = fixed;
+        while (s.length() < 9) s = " " + s;
+    }
+    return s;
+}
 
 // =========================================================================
 // SPHERE1F - Flat Earth Air Mass Factors
@@ -1657,11 +1686,13 @@ inline void PHOTO_JX(
     for (int l = 0; l < L1U; ++l) jaddto += JXTRA[l];
     int nd = 2 * L1U + 2 * jaddto + 1;
     ws.resize(nd);
+    ws.resize_opmie(nd);
 
     RadiativeSolver::OPMIE(
         dtaux_view, pomegax_view, U0, rfl_view, amf_view, amg_view,
         JXTRA, avgf_view, fjtop_view, fjbot_view, fibot_view,
-        fsbot_view, fjflx_view, flxd_view, flxd0_view, LU, ws);
+        fsbot_view, fjflx_view, flxd_view, flxd0_view, LU, state.LDOKR,
+        state.ATAU, ws);
     // PHOTO_JX_PART10_PLACEHOLDER
 
     // --- 9. Compute FFF (actinic flux * solar * FL) and call JRATET ---
@@ -1747,7 +1778,8 @@ inline void PHOTO_JX(
     // Call JRATET to compute J-values into the reused flat buffer.
     // Flat layout valjl_flat[L*NJXU + J] (row-major, matches old [L][J]).
     std::vector<double>& VALJL = wsx.VALJL_flat;
-    Photolysis::JRATET(PPJ, TTJ, fff_view, VALJL, spec, LU, NJXU);
+    Photolysis::JRATET(PPJ, TTJ, fff_view, VALJL, spec, LU, NJXU, rc);
+    if (rc != CLDJ_SUCCESS) return;
 
     // Copy VALJL to output VALJXX [LU][NJXU] column-major. This is the
     // IDENTICAL transpose as before: VALJXX[L + LU*J] <- valjl[L][J], now
@@ -1756,6 +1788,30 @@ inline void PHOTO_JX(
         for (int J = 0; J < NJXU; ++J) {
             VALJXX[L + LU * J] = VALJL[L * NJXU + J];
         }
+    }
+
+    // Diagnostic J-value table print (Fortran cldj_fjx_sub_mod.F90:781-784,
+    // inside the LPRTJ block).  PHOTO_JX is called once per quick-column
+    // approximation under CLDFLAG=7 with LPRTJ true only on the first call,
+    // so this prints the first-QCA table, exactly as the reference does.
+    if (LPRTJ) {
+        std::printf(" Fast-J ----J-values----\n");
+        std::printf(" L=  ");
+        for (int J = 0; J < state.NJX; ++J) {
+            // Fortran a6: pad/truncate the title to exactly 6 chars, then 3x.
+            std::string title = state.TITLEJX[J].substr(0, 6);
+            title.resize(6, ' ');
+            std::printf("%s   ", title.c_str());
+        }
+        std::printf("\n");
+        for (int L = LU - 1; L >= 0; --L) {
+            std::printf("%3d", L + 1);
+            for (int J = 0; J < state.NJX; ++J) {
+                std::printf("%s", format_fortran_e9_2(VALJXX[L + LU * J]).c_str());
+            }
+            std::printf("\n");
+        }
+        std::fflush(stdout);
     }
 
     // --- 10. Compute heating rates and energy budget ---

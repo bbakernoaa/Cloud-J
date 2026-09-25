@@ -29,173 +29,101 @@ using mdspan_2d_mut =
 class Engine {
 private:
   CloudJState state_;
-  Photolysis::SpecData spec_data;
-  RadiativeSolver::Workspace solver_ws;
   bool initialized_ = false;
 
 public:
-  Engine() {
-    // Load default spec data tables dimensions
-    spec_data.nw = Photolysis::W_;
-    spec_data.ns = Photolysis::S_;
-    spec_data.njx =
-        3; // O2, O3, O3(1D) standard reactions for calculation verification
-    spec_data.titlejx = {"O2", "O3", "O3(1D)"};
-    spec_data.sqq = {'t', 't', 't'};
-    spec_data.lqq = {2, 2, 2};
-
-    // Setup default cross-sections interpolation structures matching specs
-    // (flat layout: tqq[j * 3 + t], qo2/qo3/q1d[k * 3 + t])
-    spec_data.tqq.resize(3 * 3);
-    for (int j = 0; j < 3; ++j) {
-      spec_data.tqq[j * 3 + 0] = 200.0;
-      spec_data.tqq[j * 3 + 1] = 300.0;
-      spec_data.tqq[j * 3 + 2] = 400.0;
-    }
-
-    spec_data.qo2.resize(Photolysis::W_ * 3);
-    spec_data.qo3.resize(Photolysis::W_ * 3);
-    spec_data.q1d.resize(Photolysis::W_ * 3);
-    for (int k = 0; k < Photolysis::W_; ++k) {
-      spec_data.qo2[k * 3 + 0] = 1e-20;
-      spec_data.qo2[k * 3 + 1] = 2e-20;
-      spec_data.qo2[k * 3 + 2] = 3e-20;
-
-      spec_data.qo3[k * 3 + 0] = 1e-19;
-      spec_data.qo3[k * 3 + 1] = 2e-19;
-      spec_data.qo3[k * 3 + 2] = 3e-19;
-
-      spec_data.q1d[k * 3 + 0] = 0.1;
-      spec_data.q1d[k * 3 + 1] = 0.5;
-      spec_data.q1d[k * 3 + 2] = 0.9;
-    }
-
-    // Setup pre-computed reciprocal temperature span intervals
-    spec_data.inv_t12.assign(3, 0.0);
-    spec_data.inv_t23.assign(3, 0.0);
-    for (size_t j = 0; j < 3; ++j) {
-      spec_data.inv_t12[j] =
-          1.0 / (spec_data.tqq[j * 3 + 1] - spec_data.tqq[j * 3 + 0]);
-      spec_data.inv_t23[j] =
-          1.0 / (spec_data.tqq[j * 3 + 2] - spec_data.tqq[j * 3 + 1]);
-    }
-  }
-
-  const Photolysis::SpecData &get_spec_data() const noexcept {
-    return spec_data;
-  }
+  Engine() = default;
 
   /**
-   * @brief Computes photolysis rates (J-values) for a column atmosphere
-   * profile. Integrates solar light rays and core 8-stream Feautrier
-   * calculations across columns.
+   * @brief Computes photolysis rates (J-values) for a full atmospheric column.
+   *
+   * This is the high-level convenience entry point: it takes a physical column
+   * description (AtmosphericProfile), derives every array the solver needs
+   * using the same shared builder as the standalone reference driver, and runs
+   * the real CLOUD_JX radiative-transfer pipeline. The returned J-values are
+   * therefore identical to what the Fortran reference produces for the same
+   * column, rather than a stand-in.
+   *
+   * init() must have been called first so the loaded tables and climatology
+   * are available. The number of reactions per layer (j_values[l].size()) is
+   * the engine's actual NJX, and the number of layers is the CTM layer count
+   * (L_), matching the reference column.
+   *
+   * @param profile             Full column description (surface + per-level).
+   * @param solar_zenith_angle  Solar zenith angle in degrees; > 98 deg is
+   *                            treated as dark and returns zero rates.
+   * @return                    J-values per layer per reaction.
    */
   OutputRates calculate_photolysis_rates(const AtmosphericProfile &profile,
                                          double solar_zenith_angle) {
-    size_t lu = profile.get_num_layers();
+    if (!initialized_) {
+      throw Error(
+          "calculate_photolysis_rates: engine not initialized; call init() "
+          "first at Engine::calculate_photolysis_rates");
+    }
 
-    // Define J-values output layout
+    constexpr int L1 = CloudJState::L1_;
+    constexpr int NLAYERS = CloudJState::L_;
+    const int njx = state_.NJX;
+
     OutputRates rates;
-    rates.j_values.assign(lu, std::vector<double>(spec_data.njx, 0.0));
+    rates.j_values.assign(NLAYERS, std::vector<double>(njx, 0.0));
 
-    std::vector<int> jxtra(lu + 1, 0); // No inserted layers for testing
+    // Build the derived column exactly as the standalone reference driver
+    // would from the same inputs.
+    Column::Derived col;
+    Column::build_column(profile.inputs(), state_, col);
 
-    int l1u = lu + 1;
-    int jaddto = 0;
-    for (int l = 0; l < l1u; ++l) {
-      jaddto += jxtra[l];
-    }
-    int nd = 2 * l1u + 2 * jaddto + 1;
-
-    solver_ws.resize(
-        nd); // Resize persistent workspace to the actual expanded grid size nd!
-
-    // Check for dark conditions (SZA > 98.0 deg matching original
-    // cldj_fjx_sub_mod.F90 limit)
+    // Dark shortcut mirrors CLOUD_JX/PHOTO_JX (SZA > 98 deg -> zero J-values),
+    // so no solve is attempted when the column is in darkness.
     if (solar_zenith_angle > 98.0) {
-      return rates; // return zero photolysis rates instantly
+      return rates;
     }
 
-    double u0 = std::cos(solar_zenith_angle * Context::pi / 180.0);
+    double SZA = solar_zenith_angle;
+    double U0 = std::cos(SZA * CPI180);
+    double SOLF = 1.0;
+    bool LPRTJ = false;
+    int IRAN = 1;
 
-    // Core OPMIE and MIESCT physical matrices setup
-    constexpr int M2_ = RadiativeSolver::M2_;
+    // Surface reflectivity for this geometry.
+    std::vector<double> rfl;
+    Column::build_rfl(state_, U0, profile.inputs().albedo,
+                      profile.inputs().wind, profile.inputs().chlr, rfl);
 
-    std::vector<double> pomega_data(M2_ * nd * Photolysis::W_, 0.0);
-    std::vector<double> fz_data(nd * Photolysis::W_, 0.0);
-    std::vector<double> ztau_data(nd * Photolysis::W_, 0.0);
+    // Solver output buffers. VALJXX is laid out column-major [layer +
+    // (L1U-1)*reaction]; the CLOUD_JX zeroing and accumulation assume the
+    // (L1U-1) stride, so size it with the layer count and NJXU = JVN_.
+    std::vector<double> valjxx(NLAYERS * JVN_, 0.0);
+    std::vector<double> skperd((S_ + 2) * L1, 0.0);
+    std::vector<double> swmsq(6, 0.0);
+    std::vector<double> od18(L1, 0.0);
+    std::vector<double> wtqca(NQD_, 0.0);
+    int nica = 0, jcount = 0;
+    bool ldark = false;
+    int rc = CLDJ_SUCCESS;
 
-    RadiativeSolver::mdspan_3d_mut pomega(pomega_data.data(), M2_, nd,
-                                          Photolysis::W_);
-    mdspan_2d_mut fz(fz_data.data(), nd, Photolysis::W_);
-    mdspan_2d_mut ztau(ztau_data.data(), nd, Photolysis::W_);
+    cloud_jx(U0, SZA, rfl.data(), SOLF, LPRTJ,
+             col.ppp.data(), col.zzz.data(), col.ttt.data(), col.hhh.data(),
+             col.ddd.data(), col.rrr.data(), col.ooo.data(), col.ccc.data(),
+             col.lwp.data(), col.iwp.data(), col.reffl.data(),
+             col.reffi.data(), col.clf.data(), col.cldiw.data(),
+             state_.CLDCOR, col.aersp.data(), col.ndxaer.data(),
+             L1, AN_, JVN_,
+             valjxx.data(), skperd.data(), swmsq.data(), od18.data(),
+             IRAN, nica, jcount, ldark, wtqca.data(), rc);
 
-    std::vector<double> fjact_data((lu + 1) * Photolysis::W_, 0.0);
-    mdspan_2d_mut fjact(fjact_data.data(), lu + 1, Photolysis::W_);
+    if (rc != CLDJ_SUCCESS || ldark) {
+      return rates; // j_values already zero-filled
+    }
 
-    std::vector<double> fjtop_data(Photolysis::W_, 0.0);
-    RadiativeSolver::mdspan_1d_mut fjtop(fjtop_data.data(), Photolysis::W_);
-
-    std::vector<double> fjbot_data(Photolysis::W_, 0.0);
-    RadiativeSolver::mdspan_1d_mut fjbot(fjbot_data.data(), Photolysis::W_);
-
-    std::vector<double> fibot_data(5 * Photolysis::W_, 0.0);
-    mdspan_2d_mut fibot(fibot_data.data(), 5, Photolysis::W_);
-
-    std::vector<double> fsbot_data(Photolysis::W_, 0.0);
-    RadiativeSolver::mdspan_1d_mut fsbot(fsbot_data.data(), Photolysis::W_);
-
-    std::vector<double> fjflx_data((lu + 1) * Photolysis::W_, 0.0);
-    mdspan_2d_mut fjflx(fjflx_data.data(), lu + 1, Photolysis::W_);
-
-    std::vector<double> flxd_data((lu + 1) * Photolysis::W_, 0.0);
-    mdspan_2d_mut flxd(flxd_data.data(), lu + 1, Photolysis::W_);
-
-    std::vector<double> flxd0_data(Photolysis::W_, 0.0);
-    RadiativeSolver::mdspan_1d_mut flxd0(flxd0_data.data(), Photolysis::W_);
-
-    // Setup baseline profile scattering physics (with safety padding to support
-    // edge-based lookups)
-    std::vector<double> dtaux_data((lu + 1) * Photolysis::W_,
-                                   0.1); // Baseline optical depths
-    mdspan_2d_mut dtaux(dtaux_data.data(), lu + 1, Photolysis::W_);
-
-    std::vector<double> pomegax_data(M2_ * (lu + 1) * Photolysis::W_,
-                                     0.99); // Standard conservative scattering
-    RadiativeSolver::mdspan_3d_mut pomegax(pomegax_data.data(), M2_, lu + 1,
-                                           Photolysis::W_);
-
-    std::vector<double> rfl_data(5 * Photolysis::W_, 0.05); // Standard albedo
-    mdspan_2d_mut rfl(rfl_data.data(), 5, Photolysis::W_);
-
-    std::vector<double> amf_data((lu + 2) * (lu + 2),
-                                 1.0 / u0); // Air mass factor
-    mdspan_2d_mut amf(amf_data.data(), lu + 2, lu + 2);
-
-    std::vector<double> amg_data(lu + 1, 1.0); // Geometric factor
-    RadiativeSolver::mdspan_1d_mut amg(amg_data.data(), lu + 1);
-
-    // Execute full physical solver integration loop
-    RadiativeSolver::OPMIE(dtaux, pomegax, u0, rfl, amf, amg, jxtra, fjact,
-                           fjtop, fjbot, fibot, fsbot, fjflx, flxd, flxd0, lu,
-                           solver_ws);
-
-    const std::vector<double> &ppj = profile.get_pressures();
-    const std::vector<double> &ttj = profile.get_temperatures();
-
-    // Invoke JRATET to calculate temperature/pressure interpolated cross
-    // sections. Passing the solved mean actinic flux (fjact) to evaluate final
-    // J-values. JRATET now writes a flat row-major buffer [l*njx + j]; unpack
-    // it into the public OutputRates::j_values nested layout.
-    std::vector<double> valjl_flat;
-    Photolysis::JRATET(ppj, ttj, fjact, valjl_flat, spec_data, lu,
-                       spec_data.njx);
-    for (int l = 0; l < lu; ++l) {
-      for (int j = 0; j < spec_data.njx; ++j) {
-        rates.j_values[l][j] = valjl_flat[l * spec_data.njx + j];
+    // Unpack VALJXX (column-major: layer + NLAYERS*reaction) into the public
+    // per-layer nested layout, using the engine's actual reaction count.
+    for (int l = 0; l < NLAYERS; ++l) {
+      for (int j = 0; j < njx; ++j) {
+        rates.j_values[l][j] = valjxx[l + NLAYERS * j];
       }
     }
-
     return rates;
   }
 

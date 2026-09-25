@@ -73,5 +73,8 @@ _deps/
 .gemini/
 
 .specify/
-
+.kiro/
+superpowers/
+.superpowers/
+docs/superpowers/
 specs/

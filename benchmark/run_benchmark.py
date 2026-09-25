@@ -177,7 +177,13 @@ def main() -> None:
 
     try:
         for profile in seen_profiles:
-            # Prepare the profile file (modify atmos_PTClds.dat)
+            # Prepare the profile file (modify atmos_PTClds.dat).  Restore the
+            # pristine backup first: prepare_profile scales the *current* file
+            # in place, so without this the previous profile's scaling (e.g.
+            # clear-sky zeroing the cloud columns) would compound into the
+            # next one and mask the cloudy scenarios.
+            if backup_path is not None and os.path.isfile(backup_path):
+                shutil.copy2(backup_path, profile_path)
             try:
                 prepare_profile(profile, tables_dir)
             except FileNotFoundError as e:

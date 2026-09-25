@@ -2,6 +2,7 @@
 #define CLOUDJ_PHOTOLYSIS_HPP
 
 #include <cloudj/cross_sections.hpp>
+#include <cloudj/error.hpp>
 #include <cmath>
 #include <experimental/mdspan.hpp>
 #include <sstream>
@@ -60,12 +61,23 @@ JRATET(const std::vector<double> &ppj, // pressure edges [lu + 1]
                                  std::experimental::layout_left>
            fff,                       // mean actinic fluxes [W_][lu]
        std::vector<double> &valjl,    // flat [lu * njxu], row-major [l][j]
-       const SpecData &spec, int lu, int njxu) {
+       const SpecData &spec, int lu, int njxu, int &rc) {
+  // Fortran JRATET (cldj_fjx_sub_mod.F90) errors out when the host model's
+  // J-value array is too small: "CTM has not enough J-values dimensioned".
+  if (njxu < spec.njx) {
+    CLOUDJ_ERROR("CTM has not enough J-values dimensioned",
+                 "JRATET in photolysis.hpp", rc);
+    return;
+  }
   // Flat, caller-reused buffer. Row-major layout valjl[l * njxu + j] matches
   // the previous nested valjl[l][j] exactly. We size + zero the whole buffer
   // (lu*njxu) so columns j in [spec.njx, njxu) stay 0, identical to the old
   // valjl.assign(lu, vector(njxu, 0.0)) behavior.
   valjl.assign(static_cast<size_t>(lu) * njxu, 0.0);
+
+  // Per-species accumulator, reused across layers (allocated once per call
+  // rather than once per layer; re-zeroed at the top of each iteration).
+  std::vector<double> valj(spec.njx);
 
   for (int l = 0; l < lu; ++l) {
     double tt = ttj[l];
@@ -81,7 +93,7 @@ JRATET(const std::vector<double> &ppj, // pressure edges [lu + 1]
       fff(10, l) = 0.0; // 0-based index 10 corresponds to bin 11
     }
 
-    std::vector<double> valj(spec.njx, 0.0);
+    std::fill(valj.begin(), valj.end(), 0.0);
 
     // Calculate O2, O3, and O3(1D) photolysis rates (reactions 0, 1, 2)
     for (int k = 0; k < W_; ++k) {

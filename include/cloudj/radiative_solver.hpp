@@ -37,6 +37,10 @@ namespace RadiativeSolver {
 constexpr int M_ = 4;
 constexpr int M2_ = 8;
 
+namespace Photolysis {
+constexpr int W_ = 18;
+}
+
 struct alignas(64) Workspace {
   // 2D buffers flat storage
   std::vector<double> a_data;  // size: M_ * nd
@@ -50,20 +54,50 @@ struct alignas(64) Workspace {
   std::vector<double> cc_data; // size: M_ * M_ * nd
   std::vector<double> dd_data; // size: M_ * M_ * nd
 
+  // OPMIE integration buffers (hoisted out of OPMIE so the ~200KB of scratch
+  // is allocated once per thread rather than malloc'd + zeroed on every call).
+  // Only the shared OPMIE workspace carries these; the per-thread BLKSLV
+  // scratch used inside the OpenMP MIESCT loop does not need them.
+  std::vector<double> fj_data;     // size: nd * W_
+  std::vector<double> fz_data;     // size: nd * W_
+  std::vector<double> ztau_data;   // size: nd * W_
+  std::vector<double> pomega_data; // size: M2_ * nd * W_
+
+  // Resizes the OPMIE integration buffers to the current layer depth. Every
+  // element of the [0,nd) x [active-k] region is written before it is read
+  // (OPMIE setup fills even levels, the interpolation pass fills odd levels,
+  // and BLKSLV fills fj), and inactive-k bins are never read, so no zeroing
+  // is required — vector::resize only value-initialises newly-grown tail
+  // elements and is a no-op in steady state.
+  void resize_opmie(size_t nd) {
+    size_t size_2d = nd * Photolysis::W_;
+    fj_data.resize(size_2d);
+    fz_data.resize(size_2d);
+    ztau_data.resize(size_2d);
+    pomega_data.resize(static_cast<size_t>(M2_) * size_2d);
+  }
+
   // Resizes all vectors once to the required layer depth nd
   void resize(size_t nd) {
     size_t size_2d = M_ * nd;
     size_t size_3d = M_ * M_ * nd;
 
-    a_data.assign(size_2d, 0.0);
-    c_data.assign(size_2d, 0.0);
-    h_data.assign(size_2d, 0.0);
-    rr_data.assign(size_2d, 0.0);
+    // std::vector::resize is a no-op when the size is unchanged (steady
+    // state), and only value-initialises newly-grown elements otherwise.
+    // The active [0,nd) region of every buffer is fully written before it is
+    // read: GEN_ID zeroes a/c/h/b/aa/cc in its init loop, and BLKSLV writes
+    // dd/rr at every l. So there is no need to re-zero here, which is what
+    // .assign() used to do on every call (and once per wavelength bin in the
+    // OpenMP MIESCT path).
+    a_data.resize(size_2d);
+    c_data.resize(size_2d);
+    h_data.resize(size_2d);
+    rr_data.resize(size_2d);
 
-    b_data.assign(size_3d, 0.0);
-    aa_data.assign(size_3d, 0.0);
-    cc_data.assign(size_3d, 0.0);
-    dd_data.assign(size_3d, 0.0);
+    b_data.resize(size_3d);
+    aa_data.resize(size_3d);
+    cc_data.resize(size_3d);
+    dd_data.resize(size_3d);
   }
 };
 
@@ -92,9 +126,25 @@ using mdspan_1d_mut =
     std::experimental::mdspan<double, std::experimental::dextents<size_t, 1>,
                               std::experimental::layout_left>;
 
-namespace Photolysis {
-constexpr int W_ = 18;
-}
+// Static-extent variants for the fixed M_ = 4 / M2_ = 8 dimensions of the
+// block-tridiagonal workspace: only the layer dimension `nd` stays dynamic.
+// Index arithmetic (stride over l = M_*M_ etc.) folds to compile-time
+// constants, enabling the same strength reduction gfortran gets from
+// fixed-shape arrays. Offsets are arithmetically identical to the
+// all-dynamic form, so results are bit-identical.
+using mdspan_2d_mut_M = std::experimental::mdspan<
+    double,
+    std::experimental::extents<size_t, M_, std::experimental::dynamic_extent>,
+    std::experimental::layout_left>;
+using mdspan_2d_M2 = std::experimental::mdspan<
+    const double,
+    std::experimental::extents<size_t, M2_, std::experimental::dynamic_extent>,
+    std::experimental::layout_left>;
+using mdspan_3d_mut_MM = std::experimental::mdspan<
+    double,
+    std::experimental::extents<size_t, M_, M_,
+                               std::experimental::dynamic_extent>,
+    std::experimental::layout_left>;
 
 /**
  * @brief Calculates ORDINARY Legendre functions of X
@@ -116,17 +166,17 @@ inline void LEGND0(double X, double PL[], int N) {
  * @brief Generates coefficient matrices for the block tri-diagonal system.
  * Matches GEN_ID in cldj_fjx_sub_mod.F90.
  */
-inline void GEN_ID(mdspan_2d pomega, // (M2_, N_)
-                   mdspan_1d fz,     // (N_)
-                   mdspan_1d ztau,   // (N_)
+inline void GEN_ID(mdspan_2d_M2 pomega, // (M2_, N_)
+                   mdspan_1d fz,        // (N_)
+                   mdspan_1d ztau,      // (N_)
                    double zflux, const std::array<double, 5> &rfl,
                    const double pm[M_][M2_], const double pm0[M2_],
-                   mdspan_3d_mut b,  // (M_, M_, N_)
-                   mdspan_3d_mut aa, // (M_, M_, N_)
-                   mdspan_3d_mut cc, // (M_, M_, N_)
-                   mdspan_2d_mut a,  // (M_, N_)
-                   mdspan_2d_mut h,  // (M_, N_)
-                   mdspan_2d_mut c,  // (M_, N_)
+                   mdspan_3d_mut_MM b,  // (M_, M_, N_)
+                   mdspan_3d_mut_MM aa, // (M_, M_, N_)
+                   mdspan_3d_mut_MM cc, // (M_, M_, N_)
+                   mdspan_2d_mut_M a,   // (M_, N_)
+                   mdspan_2d_mut_M h,   // (M_, N_)
+                   mdspan_2d_mut_M c,   // (M_, N_)
                    int nd) {
   // Local 4x4 matrix helpers
   double s[M_][M_] = {0};
@@ -135,61 +185,64 @@ inline void GEN_ID(mdspan_2d pomega, // (M2_, N_)
   double v[M_][M_] = {0};
   double w[M_][M_] = {0};
 
-  // Initialize outputs
-  for (int l = 0; l < nd; ++l) {
-    CLOUDJ_UNROLL_4
-    for (int i = 0; i < M_; ++i) {
-      a(i, l) = 0.0;
-      c(i, l) = 0.0;
-      h(i, l) = 0.0;
-      CLOUDJ_UNROLL_4
-      for (int j = 0; j < M_; ++j) {
-        b(i, j, l) = 0.0;
-        aa(i, j, l) = 0.0;
-        cc(i, j, l) = 0.0;
-      }
-    }
-  }
+  // Initialize outputs. The buffers are exactly M_*nd / M_*M_*nd elements, so
+  // a contiguous std::fill covers precisely the [0,nd) region the strided
+  // loop below used to walk — same values, vectorizable stores.
+  std::fill(a.data_handle(), a.data_handle() + M_ * nd, 0.0);
+  std::fill(c.data_handle(), c.data_handle() + M_ * nd, 0.0);
+  std::fill(h.data_handle(), h.data_handle() + M_ * nd, 0.0);
+  std::fill(b.data_handle(), b.data_handle() + M_ * M_ * nd, 0.0);
+  std::fill(aa.data_handle(), aa.data_handle() + M_ * M_ * nd, 0.0);
+  std::fill(cc.data_handle(), cc.data_handle() + M_ * M_ * nd, 0.0);
 
   // Upper boundary: 2nd-order terms
   int l1 = 0; // 0-based Fortran L=1
   int l2 = 1; // 0-based Fortran L=2
 
+  // Hoist the loop-invariant pomega column loads: pomega is read-only but the
+  // compiler cannot prove it does not alias the b/a/c/h outputs, so it would
+  // otherwise re-issue these loads inside every i/j iteration.
+  double po1[M2_], po2[M2_];
+  for (int i = 0; i < M2_; ++i) {
+    po1[i] = pomega(i, l1);
+    po2[i] = pomega(i, l2);
+  }
+
   for (int i = 0; i < M_; ++i) {
     double sum0 =
-        pomega(0, l1) * pm[i][0] * pm0[0] + pomega(2, l1) * pm[i][2] * pm0[2] +
-        pomega(4, l1) * pm[i][4] * pm0[4] + pomega(6, l1) * pm[i][6] * pm0[6];
+        po1[0] * pm[i][0] * pm0[0] + po1[2] * pm[i][2] * pm0[2] +
+        po1[4] * pm[i][4] * pm0[4] + po1[6] * pm[i][6] * pm0[6];
     double sum2 =
-        pomega(0, l2) * pm[i][0] * pm0[0] + pomega(2, l2) * pm[i][2] * pm0[2] +
-        pomega(4, l2) * pm[i][4] * pm0[4] + pomega(6, l2) * pm[i][6] * pm0[6];
+        po2[0] * pm[i][0] * pm0[0] + po2[2] * pm[i][2] * pm0[2] +
+        po2[4] * pm[i][4] * pm0[4] + po2[6] * pm[i][6] * pm0[6];
     double sum1 =
-        pomega(1, l1) * pm[i][1] * pm0[1] + pomega(3, l1) * pm[i][3] * pm0[3] +
-        pomega(5, l1) * pm[i][5] * pm0[5] + pomega(7, l1) * pm[i][7] * pm0[7];
+        po1[1] * pm[i][1] * pm0[1] + po1[3] * pm[i][3] * pm0[3] +
+        po1[5] * pm[i][5] * pm0[5] + po1[7] * pm[i][7] * pm0[7];
     double sum3 =
-        pomega(1, l2) * pm[i][1] * pm0[1] + pomega(3, l2) * pm[i][3] * pm0[3] +
-        pomega(5, l2) * pm[i][5] * pm0[5] + pomega(7, l2) * pm[i][7] * pm0[7];
+        po2[1] * pm[i][1] * pm0[1] + po2[3] * pm[i][3] * pm0[3] +
+        po2[5] * pm[i][5] * pm0[5] + po2[7] * pm[i][7] * pm0[7];
     h(i, l1) = 0.5 * (sum0 * fz(l1) + sum2 * fz(l2));
     a(i, l1) = 0.5 * (sum1 * fz(l1) + sum3 * fz(l2));
   }
 
   for (int i = 0; i < M_; ++i) {
     for (int j = 0; j <= i; ++j) {
-      double sum0 = pomega(0, l1) * pm[i][0] * pm[j][0] +
-                    pomega(2, l1) * pm[i][2] * pm[j][2] +
-                    pomega(4, l1) * pm[i][4] * pm[j][4] +
-                    pomega(6, l1) * pm[i][6] * pm[j][6];
-      double sum2 = pomega(0, l2) * pm[i][0] * pm[j][0] +
-                    pomega(2, l2) * pm[i][2] * pm[j][2] +
-                    pomega(4, l2) * pm[i][4] * pm[j][4] +
-                    pomega(6, l2) * pm[i][6] * pm[j][6];
-      double sum1 = pomega(1, l1) * pm[i][1] * pm[j][1] +
-                    pomega(3, l1) * pm[i][3] * pm[j][3] +
-                    pomega(5, l1) * pm[i][5] * pm[j][5] +
-                    pomega(7, l1) * pm[i][7] * pm[j][7];
-      double sum3 = pomega(1, l2) * pm[i][1] * pm[j][1] +
-                    pomega(3, l2) * pm[i][3] * pm[j][3] +
-                    pomega(5, l2) * pm[i][5] * pm[j][5] +
-                    pomega(7, l2) * pm[i][7] * pm[j][7];
+      double sum0 = po1[0] * pm[i][0] * pm[j][0] +
+                    po1[2] * pm[i][2] * pm[j][2] +
+                    po1[4] * pm[i][4] * pm[j][4] +
+                    po1[6] * pm[i][6] * pm[j][6];
+      double sum2 = po2[0] * pm[i][0] * pm[j][0] +
+                    po2[2] * pm[i][2] * pm[j][2] +
+                    po2[4] * pm[i][4] * pm[j][4] +
+                    po2[6] * pm[i][6] * pm[j][6];
+      double sum1 = po1[1] * pm[i][1] * pm[j][1] +
+                    po1[3] * pm[i][3] * pm[j][3] +
+                    po1[5] * pm[i][5] * pm[j][5] +
+                    po1[7] * pm[i][7] * pm[j][7];
+      double sum3 = po2[1] * pm[i][1] * pm[j][1] +
+                    po2[3] * pm[i][3] * pm[j][3] +
+                    po2[5] * pm[i][5] * pm[j][5] +
+                    po2[7] * pm[i][7] * pm[j][7];
 
       s[i][j] = -sum2 * WT[j];
       s[j][i] = -sum2 * WT[i];
@@ -241,20 +294,18 @@ inline void GEN_ID(mdspan_2d pomega, // (M2_, N_)
   // Intermediate points: can be even or odd, A & C diagonal
   for (int ll = 1; ll <= nd - 2; ll += 2) {
     deltau = ztau(ll + 1) - ztau(ll - 1);
+    const double p1 = pomega(1, ll), p3 = pomega(3, ll), p5 = pomega(5, ll),
+                 p7 = pomega(7, ll);
     for (int i = 0; i < M_; ++i) {
       a(i, ll) = EMU[i] / deltau;
       c(i, ll) = -a(i, ll);
-      h(i, ll) = fz(ll) * (pomega(1, ll) * pm[i][1] * pm0[1] +
-                           pomega(3, ll) * pm[i][3] * pm0[3] +
-                           pomega(5, ll) * pm[i][5] * pm0[5] +
-                           pomega(7, ll) * pm[i][7] * pm0[7]);
+      h(i, ll) = fz(ll) * (p1 * pm[i][1] * pm0[1] + p3 * pm[i][3] * pm0[3] +
+                           p5 * pm[i][5] * pm0[5] + p7 * pm[i][7] * pm0[7]);
     }
     for (int i = 0; i < M_; ++i) {
       for (int j = 0; j <= i; ++j) {
-        double sum0 = pomega(1, ll) * pm[i][1] * pm[j][1] +
-                      pomega(3, ll) * pm[i][3] * pm[j][3] +
-                      pomega(5, ll) * pm[i][5] * pm[j][5] +
-                      pomega(7, ll) * pm[i][7] * pm[j][7];
+        double sum0 = p1 * pm[i][1] * pm[j][1] + p3 * pm[i][3] * pm[j][3] +
+                      p5 * pm[i][5] * pm[j][5] + p7 * pm[i][7] * pm[j][7];
         b(i, j, ll) = -sum0 * WT[j];
         b(j, i, ll) = -sum0 * WT[i];
       }
@@ -266,20 +317,18 @@ inline void GEN_ID(mdspan_2d pomega, // (M2_, N_)
 
   for (int ll = 2; ll <= nd - 3; ll += 2) {
     deltau = ztau(ll + 1) - ztau(ll - 1);
+    const double p0 = pomega(0, ll), p2 = pomega(2, ll), p4 = pomega(4, ll),
+                 p6 = pomega(6, ll);
     for (int i = 0; i < M_; ++i) {
       a(i, ll) = EMU[i] / deltau;
       c(i, ll) = -a(i, ll);
-      h(i, ll) = fz(ll) * (pomega(0, ll) * pm[i][0] * pm0[0] +
-                           pomega(2, ll) * pm[i][2] * pm0[2] +
-                           pomega(4, ll) * pm[i][4] * pm0[4] +
-                           pomega(6, ll) * pm[i][6] * pm0[6]);
+      h(i, ll) = fz(ll) * (p0 * pm[i][0] * pm0[0] + p2 * pm[i][2] * pm0[2] +
+                           p4 * pm[i][4] * pm0[4] + p6 * pm[i][6] * pm0[6]);
     }
     for (int i = 0; i < M_; ++i) {
       for (int j = 0; j <= i; ++j) {
-        double sum0 = pomega(0, ll) * pm[i][0] * pm[j][0] +
-                      pomega(2, ll) * pm[i][2] * pm[j][2] +
-                      pomega(4, ll) * pm[i][4] * pm[j][4] +
-                      pomega(6, ll) * pm[i][6] * pm[j][6];
+        double sum0 = p0 * pm[i][0] * pm[j][0] + p2 * pm[i][2] * pm[j][2] +
+                      p4 * pm[i][4] * pm[j][4] + p6 * pm[i][6] * pm[j][6];
         b(i, j, ll) = -sum0 * WT[j];
         b(j, i, ll) = -sum0 * WT[i];
       }
@@ -293,45 +342,35 @@ inline void GEN_ID(mdspan_2d pomega, // (M2_, N_)
   int l_last = nd - 1; // 0-based Fortran L=ND
   int l_prev = nd - 2; // 0-based Fortran L=ND-1
 
+  double poL[M2_], poP[M2_];
+  for (int i = 0; i < M2_; ++i) {
+    poL[i] = pomega(i, l_last);
+    poP[i] = pomega(i, l_prev);
+  }
+
   for (int i = 0; i < M_; ++i) {
-    double sum0 = pomega(0, l_last) * pm[i][0] * pm0[0] +
-                  pomega(2, l_last) * pm[i][2] * pm0[2] +
-                  pomega(4, l_last) * pm[i][4] * pm0[4] +
-                  pomega(6, l_last) * pm[i][6] * pm0[6];
-    double sum2 = pomega(0, l_prev) * pm[i][0] * pm0[0] +
-                  pomega(2, l_prev) * pm[i][2] * pm0[2] +
-                  pomega(4, l_prev) * pm[i][4] * pm0[4] +
-                  pomega(6, l_prev) * pm[i][6] * pm0[6];
-    double sum1 = pomega(1, l_last) * pm[i][1] * pm0[1] +
-                  pomega(3, l_last) * pm[i][3] * pm0[3] +
-                  pomega(5, l_last) * pm[i][5] * pm0[5] +
-                  pomega(7, l_last) * pm[i][7] * pm0[7];
-    double sum3 = pomega(1, l_prev) * pm[i][1] * pm0[1] +
-                  pomega(3, l_prev) * pm[i][3] * pm0[3] +
-                  pomega(5, l_prev) * pm[i][5] * pm0[5] +
-                  pomega(7, l_prev) * pm[i][7] * pm0[7];
+    double sum0 = poL[0] * pm[i][0] * pm0[0] + poL[2] * pm[i][2] * pm0[2] +
+                  poL[4] * pm[i][4] * pm0[4] + poL[6] * pm[i][6] * pm0[6];
+    double sum2 = poP[0] * pm[i][0] * pm0[0] + poP[2] * pm[i][2] * pm0[2] +
+                  poP[4] * pm[i][4] * pm0[4] + poP[6] * pm[i][6] * pm0[6];
+    double sum1 = poL[1] * pm[i][1] * pm0[1] + poL[3] * pm[i][3] * pm0[3] +
+                  poL[5] * pm[i][5] * pm0[5] + poL[7] * pm[i][7] * pm0[7];
+    double sum3 = poP[1] * pm[i][1] * pm0[1] + poP[3] * pm[i][3] * pm0[3] +
+                  poP[5] * pm[i][5] * pm0[5] + poP[7] * pm[i][7] * pm0[7];
     h(i, l_last) = 0.5 * (sum0 * fz(l_last) + sum2 * fz(l_prev));
     a(i, l_last) = 0.5 * (sum1 * fz(l_last) + sum3 * fz(l_prev));
   }
 
   for (int i = 0; i < M_; ++i) {
     for (int j = 0; j <= i; ++j) {
-      double sum0 = pomega(0, l_last) * pm[i][0] * pm[j][0] +
-                    pomega(2, l_last) * pm[i][2] * pm[j][2] +
-                    pomega(4, l_last) * pm[i][4] * pm[j][4] +
-                    pomega(6, l_last) * pm[i][6] * pm[j][6];
-      double sum2 = pomega(0, l_prev) * pm[i][0] * pm[j][0] +
-                    pomega(2, l_prev) * pm[i][2] * pm[j][2] +
-                    pomega(4, l_prev) * pm[i][4] * pm[j][4] +
-                    pomega(6, l_prev) * pm[i][6] * pm[j][6];
-      double sum1 = pomega(1, l_last) * pm[i][1] * pm[j][1] +
-                    pomega(3, l_last) * pm[i][3] * pm[j][3] +
-                    pomega(5, l_last) * pm[i][5] * pm[j][5] +
-                    pomega(7, l_last) * pm[i][7] * pm[j][7];
-      double sum3 = pomega(1, l_prev) * pm[i][1] * pm[j][1] +
-                    pomega(3, l_prev) * pm[i][3] * pm[j][3] +
-                    pomega(5, l_prev) * pm[i][5] * pm[j][5] +
-                    pomega(7, l_prev) * pm[i][7] * pm[j][7];
+      double sum0 = poL[0] * pm[i][0] * pm[j][0] + poL[2] * pm[i][2] * pm[j][2] +
+                    poL[4] * pm[i][4] * pm[j][4] + poL[6] * pm[i][6] * pm[j][6];
+      double sum2 = poP[0] * pm[i][0] * pm[j][0] + poP[2] * pm[i][2] * pm[j][2] +
+                    poP[4] * pm[i][4] * pm[j][4] + poP[6] * pm[i][6] * pm[j][6];
+      double sum1 = poL[1] * pm[i][1] * pm[j][1] + poL[3] * pm[i][3] * pm[j][3] +
+                    poL[5] * pm[i][5] * pm[j][5] + poL[7] * pm[i][7] * pm[j][7];
+      double sum3 = poP[1] * pm[i][1] * pm[j][1] + poP[3] * pm[i][3] * pm[j][3] +
+                    poP[5] * pm[i][5] * pm[j][5] + poP[7] * pm[i][7] * pm[j][7];
       s[i][j] = -sum2 * WT[j];
       s[j][i] = -sum2 * WT[i];
       t[i][j] = -sum1 * WT[j];
@@ -493,7 +532,7 @@ inline void invert_matrix_4x4_helper(const double B[M_][M_],
   solve_lu_4x4(invB);
 }
 
-inline void solve_pcr(mdspan_2d_mut fj, mdspan_2d pomega, mdspan_1d fz,
+inline void solve_pcr(mdspan_2d_mut fj, mdspan_2d_M2 pomega, mdspan_1d fz,
                       mdspan_1d ztau, double fsbot,
                       const std::array<double, 5> &rfl,
                       const double pm[M_][M2_], const double pm0[M2_],
@@ -502,15 +541,15 @@ inline void solve_pcr(mdspan_2d_mut fj, mdspan_2d pomega, mdspan_1d fz,
                       Workspace &ws) {
   // Create temporary block-tridiagonal views to assemble the global system
   // coefficients
-  mdspan_2d_mut a(ws.a_data.data(), M_, nd);
-  mdspan_2d_mut c(ws.c_data.data(), M_, nd);
-  mdspan_2d_mut h(ws.h_data.data(), M_, nd);
-  mdspan_2d_mut rr(ws.rr_data.data(), M_, nd);
+  mdspan_2d_mut_M a(ws.a_data.data(), M_, nd);
+  mdspan_2d_mut_M c(ws.c_data.data(), M_, nd);
+  mdspan_2d_mut_M h(ws.h_data.data(), M_, nd);
+  mdspan_2d_mut_M rr(ws.rr_data.data(), M_, nd);
 
-  mdspan_3d_mut b(ws.b_data.data(), M_, M_, nd);
-  mdspan_3d_mut aa(ws.aa_data.data(), M_, M_, nd);
-  mdspan_3d_mut cc(ws.cc_data.data(), M_, M_, nd);
-  mdspan_3d_mut dd(ws.dd_data.data(), M_, M_, nd);
+  mdspan_3d_mut_MM b(ws.b_data.data(), M_, M_, nd);
+  mdspan_3d_mut_MM aa(ws.aa_data.data(), M_, M_, nd);
+  mdspan_3d_mut_MM cc(ws.cc_data.data(), M_, M_, nd);
+  mdspan_3d_mut_MM dd(ws.dd_data.data(), M_, M_, nd);
 
   // Generate block tri-diagonal system coefficients (a, b, cc, c)
   GEN_ID(pomega, fz, ztau, fsbot, rfl, pm, pm0, b, aa, cc, a, h, c, nd);
@@ -524,10 +563,10 @@ inline void solve_pcr(mdspan_2d_mut fj, mdspan_2d pomega, mdspan_1d fz,
   std::vector<double> C_pcr(M_ * M_ * nd, 0.0);
   std::vector<double> D_pcr(M_ * nd, 0.0);
 
-  mdspan_3d_mut A_v(A_pcr.data(), M_, M_, nd);
-  mdspan_3d_mut B_v(B_pcr.data(), M_, M_, nd);
-  mdspan_3d_mut C_v(C_pcr.data(), M_, M_, nd);
-  mdspan_2d_mut D_v(D_pcr.data(), M_, nd);
+  mdspan_3d_mut_MM A_v(A_pcr.data(), M_, M_, nd);
+  mdspan_3d_mut_MM B_v(B_pcr.data(), M_, M_, nd);
+  mdspan_3d_mut_MM C_v(C_pcr.data(), M_, M_, nd);
+  mdspan_2d_mut_M D_v(D_pcr.data(), M_, nd);
 
   // Initialize PCR matrices
   for (int l = 0; l < nd; ++l) {
@@ -578,10 +617,10 @@ inline void solve_pcr(mdspan_2d_mut fj, mdspan_2d pomega, mdspan_1d fz,
     std::vector<double> C_next(M_ * M_ * nd, 0.0);
     std::vector<double> D_next(M_ * nd, 0.0);
 
-    mdspan_3d_mut An(A_next.data(), M_, M_, nd);
-    mdspan_3d_mut Bn(B_next.data(), M_, M_, nd);
-    mdspan_3d_mut Cn(C_next.data(), M_, M_, nd);
-    mdspan_2d_mut Dn(D_next.data(), M_, nd);
+    mdspan_3d_mut_MM An(A_next.data(), M_, M_, nd);
+    mdspan_3d_mut_MM Bn(B_next.data(), M_, M_, nd);
+    mdspan_3d_mut_MM Cn(C_next.data(), M_, M_, nd);
+    mdspan_2d_mut_M Dn(D_next.data(), M_, nd);
 
     for (int l = 0; l < nd; ++l) {
       double alpha[M_][M_] = {0};
@@ -835,9 +874,9 @@ inline void solve_pcr(mdspan_2d_mut fj, mdspan_2d pomega, mdspan_1d fz,
  * Translates subroutine BLKSLV in cldj_fjx_sub_mod.F90.
  */
 inline void BLKSLV(mdspan_2d_mut fj, // (N_, W_+W_r)
-                   mdspan_2d pomega, // (M2_, N_) (from K-slice)
-                   mdspan_1d fz,     // (N_) (from K-slice)
-                   mdspan_1d ztau,   // (N_) (from K-slice)
+                   mdspan_2d_M2 pomega, // (M2_, N_) (from K-slice)
+                   mdspan_1d fz,        // (N_) (from K-slice)
+                   mdspan_1d ztau,      // (N_) (from K-slice)
                    double fsbot, const std::array<double, 5> &rfl,
                    const double pm[M_][M2_], const double pm0[M2_],
                    double &fjtop, double &fjbot, std::array<double, 5> &fibot,
@@ -854,18 +893,21 @@ inline void BLKSLV(mdspan_2d_mut fj, // (N_, W_+W_r)
 
   // Create mdspan wrappers directly mapping over persistent workspace buffers
   // (zero allocation)
-  mdspan_2d_mut a(ws.a_data.data(), M_, nd);
-  mdspan_2d_mut c(ws.c_data.data(), M_, nd);
-  mdspan_2d_mut h(ws.h_data.data(), M_, nd);
-  mdspan_2d_mut rr(ws.rr_data.data(), M_, nd);
+  mdspan_2d_mut_M a(ws.a_data.data(), M_, nd);
+  mdspan_2d_mut_M c(ws.c_data.data(), M_, nd);
+  mdspan_2d_mut_M h(ws.h_data.data(), M_, nd);
+  mdspan_2d_mut_M rr(ws.rr_data.data(), M_, nd);
 
-  mdspan_3d_mut b(ws.b_data.data(), M_, M_, nd);
-  mdspan_3d_mut aa(ws.aa_data.data(), M_, M_, nd);
-  mdspan_3d_mut cc(ws.cc_data.data(), M_, M_, nd);
-  mdspan_3d_mut dd(ws.dd_data.data(), M_, M_, nd);
+  mdspan_3d_mut_MM b(ws.b_data.data(), M_, M_, nd);
+  mdspan_3d_mut_MM aa(ws.aa_data.data(), M_, M_, nd);
+  mdspan_3d_mut_MM cc(ws.cc_data.data(), M_, M_, nd);
+  mdspan_3d_mut_MM dd(ws.dd_data.data(), M_, M_, nd);
 
   // Generate block tri-diagonal system
   GEN_ID(pomega, fz, ztau, fsbot, rfl, pm, pm0, b, aa, cc, a, h, c, nd);
+
+
+
 
   // UPPER BOUNDARY L=1 (0-based: l=0)
   double E[M_][M_];
@@ -900,6 +942,7 @@ inline void BLKSLV(mdspan_2d_mut fj, // (N_, W_+W_r)
         E[i][j] = b(i, j, l);
       }
     }
+
 
     solve_lu_4x4(E);
 
@@ -948,6 +991,7 @@ inline void BLKSLV(mdspan_2d_mut fj, // (N_, W_+W_r)
     }
   }
 
+
   // MEAN J & H (Fortran 1-based level structure)
   // 0-based L indices: L=0, 2, 4... are odd levels (Fortran 1, 3, 5...)
   // L=1, 3, 5... are even levels (Fortran 2, 4, 6...)
@@ -987,6 +1031,7 @@ inline void BLKSLV(mdspan_2d_mut fj, // (N_, W_+W_r)
   for (int j = 0; j < 4; ++j) {
     fibot[j] = 2.0 * rr(j, l_last) - sumbx;
   }
+
 }
 
 // Forward declaration of MIESCT
@@ -1000,6 +1045,7 @@ inline void MIESCT(mdspan_2d_mut fj,     // (N_, W_+W_r)
                    mdspan_1d fsbot,      // (W_)
                    mdspan_2d rfl,        // (5, W_)
                    double u0, int nd,
+                   const int *ldokr, // (W_+W_r) active-bin flags, Fortran LDOKR
                    Workspace &ws // Persistent pre-allocated workspace reference
 );
 
@@ -1023,6 +1069,8 @@ inline void OPMIE(mdspan_2d dtaux,       // (N_-1, W_)
                   mdspan_2d_mut flxd,            // (N_-1, W_)
                   mdspan_1d_mut flxd0,           // (W_)
                   int lu,
+                  const int *ldokr, // (W_+W_r) active-bin flags, Fortran LDOKR
+                  double atau,      // geometric factor for sub-layer insertion
                   Workspace &ws // Persistent pre-allocated workspace reference
 ) {
   int l1u = lu + 1;
@@ -1046,17 +1094,15 @@ inline void OPMIE(mdspan_2d dtaux,       // (N_-1, W_)
   std::vector<double> pomega1_data(M2_ * (l1u + 1), 0.0);
   mdspan_2d_mut pomega1(pomega1_data.data(), M2_, l1u + 1);
 
-  // MIESCT integration arrays
-  std::vector<double> fj_data(nd * Photolysis::W_, 0.0);
+  // MIESCT integration arrays: persistent workspace buffers (see
+  // Workspace::resize_opmie) — no per-call allocation or zeroing.
+  std::vector<double>& fj_data = ws.fj_data;
+  std::vector<double>& fz_data = ws.fz_data;
+  std::vector<double>& ztau_data = ws.ztau_data;
+  std::vector<double>& pomega_data = ws.pomega_data;
   mdspan_2d_mut fj(fj_data.data(), nd, Photolysis::W_);
-
-  std::vector<double> fz_data(nd * Photolysis::W_, 0.0);
   mdspan_2d_mut fz(fz_data.data(), nd, Photolysis::W_);
-
-  std::vector<double> ztau_data(nd * Photolysis::W_, 0.0);
   mdspan_2d_mut ztau(ztau_data.data(), nd, Photolysis::W_);
-
-  std::vector<double> pomega_data(M2_ * nd * Photolysis::W_, 0.0);
   mdspan_3d_mut pomega(pomega_data.data(), M2_, nd, Photolysis::W_);
 
   // Per-wavelength (k) setup: builds dtau1/ttau/ftau/pomega1 scratch and
@@ -1133,7 +1179,11 @@ inline void OPMIE(mdspan_2d dtaux,       // (N_-1, W_)
       }
     }
 
-    constexpr double atau = 1.05 / 0.005;
+    // Geometric factor for sub-layer tau interpolation. The Fortran OPMIE
+    // uses the module ATAU (the same value EXTRAL1 was called with, e.g.
+    // 1.05); the source comment "ATAU = 1.05 / 0.005" documents the tuned
+    // ATAU/ATAU0 *pair*, not a division. Using ATAU/ATAU0 here instead
+    // overflows pow() for thick clouds and collapses the grid.
 
     for (int l = 0; l < l1u; ++l) {
       int l2 = l2lev[l];
@@ -1249,6 +1299,8 @@ inline void OPMIE(mdspan_2d dtaux,       // (N_-1, W_)
   // independent.
 #pragma omp parallel for schedule(static)
   for (int k = 0; k < Photolysis::W_; ++k) {
+    if (ldokr[k] <= 0)
+      continue; // Fortran: skip zero-solar bins (TROP-only NWBIN=8/12)
     thread_local std::vector<double> ttau_tls;
     thread_local std::vector<double> dtau1_tls;
     thread_local std::vector<double> ftau_tls;
@@ -1263,12 +1315,16 @@ inline void OPMIE(mdspan_2d dtaux,       // (N_-1, W_)
   }
 #else
   for (int k = 0; k < Photolysis::W_; ++k) {
+    if (ldokr[k] <= 0)
+      continue; // Fortran: skip zero-solar bins (TROP-only NWBIN=8/12)
     opmie_setup_k(k, ttau, dtau1, ftau, pomega1);
   }
 #endif
 
+
   // Call MIESCT inside the workspace to orchestrate solving
-  MIESCT(fj, fjtop, fjbot, fibot, pomega, fz, ztau, fsbot, rfl, u0, nd, ws);
+  MIESCT(fj, fjtop, fjbot, fibot, pomega, fz, ztau, fsbot, rfl, u0, nd, ldokr,
+         ws);
 
   // Post-processing (fjact/fjflx): reads/writes exclusively through the k-th
   // column of fj/fz/ztau/fjact/fjflx, and uses no shared mutable scratch, so
@@ -1304,10 +1360,14 @@ inline void OPMIE(mdspan_2d dtaux,       // (N_-1, W_)
 #if defined(CLOUDJ_USE_OPENMP)
 #pragma omp parallel for schedule(static)
   for (int k = 0; k < Photolysis::W_; ++k) {
+    if (ldokr[k] <= 0)
+      continue; // Fortran: skipped bins keep their zeroed fjact/fjflx
     opmie_postproc_k(k);
   }
 #else
   for (int k = 0; k < Photolysis::W_; ++k) {
+    if (ldokr[k] <= 0)
+      continue; // Fortran: skipped bins keep their zeroed fjact/fjflx
     opmie_postproc_k(k);
   }
 #endif
@@ -1322,6 +1382,7 @@ inline void MIESCT(mdspan_2d_mut fj,     // (N_, W_+W_r)
                    mdspan_1d fsbot,      // (W_)
                    mdspan_2d rfl,        // (5, W_)
                    double u0, int nd,
+                   const int *ldokr, // (W_+W_r) active-bin flags, Fortran LDOKR
                    Workspace &ws // Persistent pre-allocated workspace reference
 ) {
   double pm[M_][M2_];
@@ -1348,8 +1409,8 @@ inline void MIESCT(mdspan_2d_mut fj,     // (N_, W_+W_r)
   // k_idx, so no thread ever writes another thread's k_idx slice.
   auto miesct_solve_k = [&](int k_idx, Workspace &local_ws) {
     // Create views for the current wavelength slice to pass into BLKSLV
-    mdspan_2d_mut pomega_slice(pomega.data_handle() + k_idx * (M2_ * nd), M2_,
-                               nd);
+    mdspan_2d_M2 pomega_slice(pomega.data_handle() + k_idx * (M2_ * nd), M2_,
+                              nd);
     mdspan_1d fz_slice(fz.data_handle() + k_idx * nd, nd);
     mdspan_1d ztau_slice(ztau.data_handle() + k_idx * nd, nd);
 
@@ -1386,6 +1447,8 @@ inline void MIESCT(mdspan_2d_mut fj,     // (N_, W_+W_r)
   // serial path since each k_idx's solve is fully independent.
 #pragma omp parallel for schedule(static)
   for (int k_idx = 0; k_idx < Photolysis::W_; ++k_idx) {
+    if (ldokr[k_idx] <= 0)
+      continue; // Fortran BLKSLV: skip zero-solar bins entirely
     thread_local Workspace tls_ws;
     tls_ws.resize(nd);
     miesct_solve_k(k_idx, tls_ws);
@@ -1394,6 +1457,8 @@ inline void MIESCT(mdspan_2d_mut fj,     // (N_, W_+W_r)
   // Default (safe) path: single shared workspace reused serially across all
   // 18 wavelength bins, exactly as before this change.
   for (int k_idx = 0; k_idx < Photolysis::W_; ++k_idx) {
+    if (ldokr[k_idx] <= 0)
+      continue; // Fortran BLKSLV: skip zero-solar bins entirely
     miesct_solve_k(k_idx, ws);
   }
 #endif
